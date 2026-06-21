@@ -313,7 +313,7 @@ export const itemsStore = {
 export function useItems(): Item[] {
   return useSyncExternalStore(
     itemsStore.subscribe,
-    () => itemsStore.getItems(),
+    getItemsSnapshot,
     () => [],
   );
 }
@@ -321,7 +321,7 @@ export function useItems(): Item[] {
 export function useSettings(): Settings {
   return useSyncExternalStore(
     itemsStore.subscribe,
-    () => itemsStore.getSettings(),
+    getSettingsSnapshot,
     () => DEFAULT_SETTINGS,
   );
 }
