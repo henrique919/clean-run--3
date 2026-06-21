@@ -10,9 +10,11 @@ import {
   HardHat,
   Settings2,
   CheckCircle2,
+  Building2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { useSettings, itemsStore } from "@/lib/store";
 
 const mobileTabs = [
   { to: "/", label: "Home", icon: Home },
