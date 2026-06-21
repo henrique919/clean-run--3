@@ -45,7 +45,7 @@ function ItemDetail() {
 
   return (
     <AppShell
-      title={`${item.building} · ${item.unit} · ${item.room}`}
+      title={`${item.code} · ${item.building} · ${item.unit} · ${item.room}`}
       subtitle={item.project}
       action={
         <Link to="/items" className="text-xs text-muted-foreground inline-flex items-center gap-1">

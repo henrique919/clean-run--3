@@ -1,12 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import { Camera, MapPin, CalendarDays, User, ArrowRight } from "lucide-react";
 import type { Item } from "@/lib/types";
-import { nextActionLabel, TYPE_LABEL } from "@/lib/types";
+import { nextActionLabel, TYPE_LABEL, isEscalated } from "@/lib/types";
 import { isOverdue } from "@/lib/store";
-import { StatusChip, PriorityChip, OverdueChip } from "./StatusChip";
+import { StatusChip, PriorityChip, OverdueChip, EscalatedChip } from "./StatusChip";
 
 export function ItemCard({ item }: { item: Item }) {
   const overdue = isOverdue(item);
+  const escalated = isEscalated(item);
   const isClosed = item.status === "closed" || item.status === "complete";
   return (
     <Link
@@ -29,13 +30,19 @@ export function ItemCard({ item }: { item: Item }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 flex-1 text-xs text-muted-foreground flex items-center gap-1">
-              <MapPin className="h-3 w-3 shrink-0" />
-              <span className="truncate">
-                {item.building} · {item.level} · {item.unit} · {item.room}
-              </span>
+            <span className="rounded-md bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-foreground">
+              {item.code}
+            </span>
+            <div className="flex items-center gap-1">
+              {escalated && <EscalatedChip />}
+              {overdue && <OverdueChip />}
             </div>
-            {overdue ? <OverdueChip /> : null}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground flex items-center gap-1">
+            <MapPin className="h-3 w-3 shrink-0" />
+            <span className="truncate">
+              {item.building} · {item.level} · {item.unit} · {item.room}
+            </span>
           </div>
           <p className="mt-1 line-clamp-2 text-sm font-medium leading-snug text-foreground">{item.description}</p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
