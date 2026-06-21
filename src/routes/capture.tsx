@@ -68,12 +68,111 @@ function CapturePage() {
   const cameraRef = useRef<HTMLInputElement>(null);
   const libRef = useRef<HTMLInputElement>(null);
 
+  // Voice note state
+  const [recording, setRecording] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [transcript, setTranscript] = useState<string>("");
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const transcribe = useServerFn(transcribeAndExtract);
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
   function update<K extends keyof Draft>(k: K, v: Draft[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
   }
 
-  async function handleFiles(files: FileList | null) {
-    if (!files) return;
+  function pickMime(): string | undefined {
+    if (typeof MediaRecorder === "undefined") return undefined;
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mpeg"];
+    return candidates.find((c) => MediaRecorder.isTypeSupported(c));
+  }
+
+  async function startRecording() {
+    try {
+      const mimeType = pickMime();
+      if (!mimeType) {
+        toast.error("This browser can't record a supported audio format.");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const rec = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType });
+        if (blob.size < 1024) {
+          toast.error("That recording was empty — please try again.");
+          return;
+        }
+        await sendForTranscription(blob);
+      };
+      rec.start();
+      recorderRef.current = rec;
+      setRecording(true);
+    } catch {
+      toast.error("Microphone access denied.");
+    }
+  }
+
+  function stopRecording() {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setRecording(false);
+  }
+
+  async function sendForTranscription(blob: Blob) {
+    setProcessing(true);
+    try {
+      const buf = await blob.arrayBuffer();
+      // Chunked base64 conversion to avoid stack overflow
+      const u8 = new Uint8Array(buf);
+      let bin = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < u8.length; i += CHUNK) {
+        bin += String.fromCharCode(...u8.subarray(i, i + CHUNK));
+      }
+      const audioBase64 = btoa(bin);
+      const result = await transcribe({
+        data: {
+          audioBase64,
+          mimeType: blob.type || "audio/webm",
+          projects: settings.projects,
+          trades: TRADES,
+          subcontractors: settings.subcontractors,
+        },
+      });
+      setTranscript(result.transcript);
+      const f = result.fields || {};
+      setDraft((d) => ({
+        ...d,
+        building: f.building || d.building,
+        level: f.level || d.level,
+        unit: f.unit || d.unit,
+        room: f.room || d.room,
+        trade: f.trade || d.trade,
+        subcontractor: f.subcontractor || d.subcontractor,
+        priority: (f.priority as Priority) || d.priority,
+        description: f.description ? (d.description ? `${d.description}\n${f.description}` : f.description) : d.description,
+      }));
+      toast.success("Voice note transcribed and applied.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Transcription failed";
+      toast.error(msg);
+    } finally {
+      setProcessing(false);
+    }
+  }
     const arr = await Promise.all(
       Array.from(files).map(
         (f) =>
