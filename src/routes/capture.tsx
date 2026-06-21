@@ -173,6 +173,9 @@ function CapturePage() {
       setProcessing(false);
     }
   }
+
+  async function handleFiles(files: FileList | null) {
+    if (!files) return;
     const arr = await Promise.all(
       Array.from(files).map(
         (f) =>
