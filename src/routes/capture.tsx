@@ -1,6 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Camera, Images, X, Mic, ChevronDown } from "lucide-react";
-import { useRef, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { Camera, Images, X, Mic, Square, Loader2, Sparkles, ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { itemsStore, useSettings } from "@/lib/store";
 import { TRADES, type ItemType, type Priority } from "@/lib/types";
+import { transcribeAndExtract } from "@/lib/voice.functions";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/capture")({
@@ -65,8 +68,110 @@ function CapturePage() {
   const cameraRef = useRef<HTMLInputElement>(null);
   const libRef = useRef<HTMLInputElement>(null);
 
+  // Voice note state
+  const [recording, setRecording] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [transcript, setTranscript] = useState<string>("");
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const transcribe = useServerFn(transcribeAndExtract);
+
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
   function update<K extends keyof Draft>(k: K, v: Draft[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
+  }
+
+  function pickMime(): string | undefined {
+    if (typeof MediaRecorder === "undefined") return undefined;
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mpeg"];
+    return candidates.find((c) => MediaRecorder.isTypeSupported(c));
+  }
+
+  async function startRecording() {
+    try {
+      const mimeType = pickMime();
+      if (!mimeType) {
+        toast.error("This browser can't record a supported audio format.");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const rec = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType });
+        if (blob.size < 1024) {
+          toast.error("That recording was empty — please try again.");
+          return;
+        }
+        await sendForTranscription(blob);
+      };
+      rec.start();
+      recorderRef.current = rec;
+      setRecording(true);
+    } catch {
+      toast.error("Microphone access denied.");
+    }
+  }
+
+  function stopRecording() {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setRecording(false);
+  }
+
+  async function sendForTranscription(blob: Blob) {
+    setProcessing(true);
+    try {
+      const buf = await blob.arrayBuffer();
+      // Chunked base64 conversion to avoid stack overflow
+      const u8 = new Uint8Array(buf);
+      let bin = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < u8.length; i += CHUNK) {
+        bin += String.fromCharCode(...u8.subarray(i, i + CHUNK));
+      }
+      const audioBase64 = btoa(bin);
+      const result = await transcribe({
+        data: {
+          audioBase64,
+          mimeType: blob.type || "audio/webm",
+          projects: settings.projects,
+          trades: TRADES,
+          subcontractors: settings.subcontractors,
+        },
+      });
+      setTranscript(result.transcript);
+      const f = result.fields || {};
+      setDraft((d) => ({
+        ...d,
+        building: f.building || d.building,
+        level: f.level || d.level,
+        unit: f.unit || d.unit,
+        room: f.room || d.room,
+        trade: f.trade || d.trade,
+        subcontractor: f.subcontractor || d.subcontractor,
+        priority: (f.priority as Priority) || d.priority,
+        description: f.description ? (d.description ? `${d.description}\n${f.description}` : f.description) : d.description,
+      }));
+      toast.success("Voice note transcribed and applied.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Transcription failed";
+      toast.error(msg);
+    } finally {
+      setProcessing(false);
+    }
   }
 
   async function handleFiles(files: FileList | null) {
@@ -183,13 +288,50 @@ function CapturePage() {
           </div>
         )}
 
-        <button
-          type="button"
-          className="mt-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-          onClick={() => alert("Voice note — coming soon. TODO: integrate audio capture.")}
-        >
-          <Mic className="h-3.5 w-3.5" /> Voice note (optional)
-        </button>
+        <div className="mt-3 rounded-xl border border-dashed border-border bg-background/40 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-sm font-medium">
+                <Sparkles className="h-3.5 w-3.5 text-primary" />
+                Voice note → auto-fill
+              </div>
+              <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+                e.g. “Building 3, Unit 301, Laundry, tiling needs to be rectified, ASTW Tiling to action.”
+              </p>
+            </div>
+            {!recording ? (
+              <button
+                type="button"
+                onClick={startRecording}
+                disabled={processing}
+                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:brightness-110 disabled:opacity-60"
+              >
+                {processing ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Transcribing…
+                  </>
+                ) : (
+                  <>
+                    <Mic className="h-3.5 w-3.5" /> Record
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={stopRecording}
+                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-red-600 px-4 text-xs font-semibold text-white animate-pulse"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" /> Stop
+              </button>
+            )}
+          </div>
+          {transcript && (
+            <p className="mt-2 rounded-md bg-muted/50 p-2 text-[11px] italic text-muted-foreground">
+              “{transcript}”
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Type toggle */}
