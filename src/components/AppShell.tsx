@@ -55,7 +55,7 @@ export function AppShell({ children, title, subtitle, action }: {
         </div>
         <nav className="mt-2 flex-1 space-y-0.5 px-3">
           {desktopNav.map((n) => {
-            const active = pathname === n.to || (n.to !== "/" && pathname.startsWith(n.to));
+            const active = pathname === n.to || pathname.startsWith(n.to + "/");
             return (
               <Link
                 key={n.to}
