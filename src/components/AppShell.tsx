@@ -10,9 +10,11 @@ import {
   HardHat,
   Settings2,
   CheckCircle2,
+  Building2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { useSettings, itemsStore } from "@/lib/store";
 
 const mobileTabs = [
   { to: "/", label: "Home", icon: Home },
@@ -39,6 +41,7 @@ export function AppShell({ children, title, subtitle, action }: {
   action?: ReactNode;
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const settings = useSettings();
 
   return (
     <div className="min-h-screen bg-background">
@@ -87,8 +90,8 @@ export function AppShell({ children, title, subtitle, action }: {
       <header className="sticky top-0 z-30 border-b border-border bg-background/95 px-4 py-3 backdrop-blur lg:hidden">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">CleanRun IQ</p>
-            <h1 className="truncate text-base font-semibold">{title ?? "Field Mode"}</h1>
+            <p className="text-[11px] uppercase tracking-wider text-muted-foreground">CleanRun IQ</p>
+            <h1 className="truncate text-base font-semibold tracking-tight">{title ?? "Field Mode"}</h1>
             {subtitle ? <p className="truncate text-xs text-muted-foreground">{subtitle}</p> : null}
           </div>
           {action}
@@ -98,16 +101,31 @@ export function AppShell({ children, title, subtitle, action }: {
       {/* Main content */}
       <main className="lg:pl-64">
         <div className="mx-auto max-w-5xl px-4 pb-28 pt-4 lg:px-8 lg:pt-8">
-          <div className="mb-6 hidden items-end justify-between lg:flex">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+          <div className="mb-6 hidden items-center justify-between gap-4 lg:flex">
+            <div className="min-w-0">
+              <h1 className="truncate text-2xl font-semibold tracking-tight">{title}</h1>
               {subtitle ? <p className="text-sm text-muted-foreground">{subtitle}</p> : null}
             </div>
-            {action}
+            <div className="flex items-center gap-2">
+              {settings.projects.length > 1 ? (
+                <label className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs">
+                  <Building2 className="h-3.5 w-3.5 text-muted-foreground" />
+                  <select
+                    value={settings.activeProject}
+                    onChange={(e) => itemsStore.setActiveProject(e.target.value)}
+                    className="bg-transparent text-xs font-medium outline-none"
+                  >
+                    {settings.projects.map((p: string) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </label>
+              ) : null}
+              {action}
+            </div>
           </div>
           {children}
         </div>
       </main>
+
 
       {/* Mobile bottom nav */}
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 backdrop-blur lg:hidden">
