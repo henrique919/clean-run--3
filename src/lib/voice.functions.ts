@@ -96,13 +96,13 @@ Return ONLY a JSON object with this shape:
   "room": string,        // room/location, e.g. "Laundry", "Master ensuite"
   "trade": string,       // MUST be one of the provided trade options, exact match, or ""
   "subcontractor": string, // MUST be one of the provided subcontractor options, exact match, or ""
-  "priority": "low"|"medium"|"high"|"urgent",
+  "priority": "high"|"urgent",
   "description": string  // short, specific defect description in proper sentence case
 }
 Rules:
 - Use "" for any field not clearly stated.
 - Match trade and subcontractor by fuzzy intent against the provided lists (e.g. "ASTW Tiling" -> closest sub containing "ASTW" or "Tiling").
-- Default priority to "medium" unless urgency stated.
+- Default priority to "high". Only use "urgent" if speaker uses words like urgent, critical, immediate, safety, or stop-work.
 - Description should be the rectification action, not the meta location.`;
 
     const user = `Trades available: ${JSON.stringify(data.trades)}
