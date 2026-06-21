@@ -115,7 +115,7 @@ export function AppShell({ children, title, subtitle, action }: {
                     onChange={(e) => itemsStore.setActiveProject(e.target.value)}
                     className="bg-transparent text-xs font-medium outline-none"
                   >
-                    {settings.projects.map((p) => <option key={p} value={p}>{p}</option>)}
+                    {settings.projects.map((p: string) => <option key={p} value={p}>{p}</option>)}
                   </select>
                 </label>
               ) : null}
