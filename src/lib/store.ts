@@ -197,17 +197,44 @@ function seedItems(): Item[] {
 }
 
 const listeners = new Set<() => void>();
-function emit() { listeners.forEach((l) => l()); }
+
+// Cached snapshots so useSyncExternalStore sees stable references between
+// emits. Without this, every render re-parses localStorage and returns a new
+// array/object → React thinks state changed → infinite re-render loop.
+let itemsCache: Item[] | null = null;
+let settingsCache: Settings | null = null;
+
+function getItemsSnapshot(): Item[] {
+  if (itemsCache === null) itemsCache = loadItems();
+  return itemsCache;
+}
+
+function getSettingsSnapshot(): Settings {
+  if (settingsCache === null) settingsCache = loadSettings();
+  return settingsCache;
+}
+
+function emit() {
+  itemsCache = null;
+  settingsCache = null;
+  listeners.forEach((l) => l());
+}
 
 function saveItems(items: Item[]) {
   if (isBrowser) localStorage.setItem(KEY, JSON.stringify(items));
-  emit();
+  itemsCache = items;
+  settingsCache = null;
+  listeners.forEach((l) => l());
 }
 
 function saveSettings(s: Settings) {
   if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  emit();
+  settingsCache = s;
+  listeners.forEach((l) => l());
 }
+
+// Keep emit referenced to avoid "unused" lint errors when not directly called.
+void emit;
 
 export const itemsStore = {
   subscribe(fn: () => void) {
