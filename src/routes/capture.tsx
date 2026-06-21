@@ -1,6 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Camera, Images, X, Mic, ChevronDown } from "lucide-react";
-import { useRef, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { Camera, Images, X, Mic, Square, Loader2, Sparkles, ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { itemsStore, useSettings } from "@/lib/store";
 import { TRADES, type ItemType, type Priority } from "@/lib/types";
+import { transcribeAndExtract } from "@/lib/voice.functions";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/capture")({
