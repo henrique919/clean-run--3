@@ -15,7 +15,7 @@ interface ExtractedFields {
   room?: string;
   trade?: string;
   subcontractor?: string;
-  priority?: "low" | "medium" | "high" | "urgent";
+  priority?: "high" | "urgent";
   description?: string;
   project?: string;
 }
