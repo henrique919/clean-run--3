@@ -47,7 +47,7 @@ const emptyDraft = (project: string): Draft => ({
   type: "defect",
   trade: "",
   subcontractor: "",
-  priority: "medium",
+  priority: "high",
   dueDate: addDays(7),
   description: "",
   photos: [],
@@ -358,7 +358,7 @@ function CapturePage() {
           <Selectish label="Subcontractor" value={draft.subcontractor} onChange={(v) => update("subcontractor", v)} options={settings.subcontractors} placeholder="Select sub" />
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["low","medium","high","urgent"]} />
+          <Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["high","urgent"]} />
           <Field label="Due date"><Input type="date" value={draft.dueDate} onChange={(e) => update("dueDate", e.target.value)} /></Field>
         </div>
       </Section>
