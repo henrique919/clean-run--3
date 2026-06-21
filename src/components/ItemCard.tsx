@@ -1,18 +1,20 @@
 import { Link } from "@tanstack/react-router";
-import { Camera, MapPin, CalendarDays, User } from "lucide-react";
+import { Camera, MapPin, CalendarDays, User, ArrowRight } from "lucide-react";
 import type { Item } from "@/lib/types";
+import { nextActionLabel, TYPE_LABEL } from "@/lib/types";
 import { isOverdue } from "@/lib/store";
 import { StatusChip, PriorityChip, OverdueChip } from "./StatusChip";
 
 export function ItemCard({ item }: { item: Item }) {
   const overdue = isOverdue(item);
+  const isClosed = item.status === "closed" || item.status === "complete";
   return (
     <Link
       to="/items/$id"
       params={{ id: item.id }}
-      className="group block rounded-2xl border border-border bg-card p-3 transition hover:border-primary/40 hover:shadow-sm"
+      className="group block overflow-hidden rounded-2xl border border-border bg-card transition hover:border-primary/40 hover:shadow-[0_2px_12px_-4px_rgb(0_0_0_/0.08)]"
     >
-      <div className="flex gap-3">
+      <div className="flex gap-3 p-3">
         <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-muted">
           {item.photos[0] ? (
             <img src={item.photos[0]} alt="" className="h-full w-full object-cover" />
@@ -21,6 +23,9 @@ export function ItemCard({ item }: { item: Item }) {
               <Camera className="h-6 w-6" />
             </div>
           )}
+          <span className="absolute bottom-1 left-1 rounded-full bg-background/85 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-foreground/80 backdrop-blur">
+            {TYPE_LABEL[item.type]}
+          </span>
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
@@ -32,7 +37,7 @@ export function ItemCard({ item }: { item: Item }) {
             </div>
             {overdue ? <OverdueChip /> : null}
           </div>
-          <p className="mt-1 line-clamp-2 text-sm font-medium text-foreground">{item.description}</p>
+          <p className="mt-1 line-clamp-2 text-sm font-medium leading-snug text-foreground">{item.description}</p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <StatusChip status={item.status} />
             <PriorityChip priority={item.priority} />
@@ -49,6 +54,14 @@ export function ItemCard({ item }: { item: Item }) {
           </div>
         </div>
       </div>
+      {!isClosed && (
+        <div className="flex items-center justify-between border-t border-border bg-muted/40 px-3 py-1.5 text-[11px]">
+          <span className="text-muted-foreground">Next</span>
+          <span className="inline-flex items-center gap-1 font-medium text-primary">
+            {nextActionLabel(item.status)} <ArrowRight className="h-3 w-3" />
+          </span>
+        </div>
+      )}
     </Link>
   );
 }

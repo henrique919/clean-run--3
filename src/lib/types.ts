@@ -49,18 +49,26 @@ export interface Item {
 }
 
 export const TRADES = [
-  "Carpentry",
   "Painting",
-  "Plumbing",
-  "Electrical",
-  "Tiling",
   "Plastering",
-  "HVAC",
-  "Glazing",
-  "Flooring",
-  "Cleaning",
+  "Tiling",
+  "Waterproofing",
   "Joinery",
-  "Other",
+  "Doors / Hardware",
+  "Windows / Aluminium",
+  "Flooring",
+  "Roofing",
+  "Cladding",
+  "Electrical",
+  "Hydraulic",
+  "Mechanical",
+  "Fire Services",
+  "Cleaning",
+  "Landscaping",
+  "Concrete",
+  "Render",
+  "Caulking / Sealant",
+  "General Damage",
 ];
 
 export const STATUS_LABEL: Record<ItemStatus, string> = {
@@ -73,3 +81,23 @@ export const STATUS_LABEL: Record<ItemStatus, string> = {
   closed: "Closed",
   complete: "Complete",
 };
+
+export const TYPE_LABEL: Record<ItemType, string> = {
+  defect: "Defect",
+  incomplete: "Incomplete Work",
+  client: "Client Defect",
+};
+
+/** Recommended next-action label for each status. */
+export function nextActionLabel(status: ItemStatus): string {
+  switch (status) {
+    case "open": return "Issue to subcontractor";
+    case "issued": return "Mark in progress";
+    case "in_progress": return "Mark ready for review";
+    case "ready_for_review": return "Start inspection";
+    case "under_inspection": return "Close with evidence";
+    case "rejected": return "Re-issue";
+    case "closed":
+    case "complete": return "Closed";
+  }
+}
