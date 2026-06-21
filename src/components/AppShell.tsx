@@ -41,6 +41,7 @@ export function AppShell({ children, title, subtitle, action }: {
   action?: ReactNode;
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const settings = useSettings();
 
   return (
     <div className="min-h-screen bg-background">
