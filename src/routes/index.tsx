@@ -30,7 +30,7 @@ function FieldHome() {
   const next = projectItems
     .filter((i) => i.status !== "closed" && i.status !== "complete")
     .sort((a, b) => {
-      const pr = { urgent: 0, high: 1, medium: 2, low: 3 } as const;
+      const pr = { urgent: 0, high: 1 } as const;
       if (pr[a.priority] !== pr[b.priority]) return pr[a.priority] - pr[b.priority];
       return a.dueDate.localeCompare(b.dueDate);
     })
