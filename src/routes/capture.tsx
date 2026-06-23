@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { activeProjectConfig, itemsStore, useSettings } from "@/lib/store";
-import { RAISED_BY_OPTIONS, TRADES, type ItemType, type Priority } from "@/lib/types";
+import { activeProjectConfig, itemsStore, type Settings, useSettings } from "@/lib/store";
+import { RAISED_BY_OPTIONS, TRADES, TYPE_LABEL, type Item, type ItemType, type Priority, type ProjectConfig } from "@/lib/types";
 import { transcribeAndExtract } from "@/lib/voice.functions";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +39,24 @@ interface Draft {
   raisedBy: string;
 }
 
+const fallbackConfig = (projectName: string): ProjectConfig => ({
+  name: projectName,
+  address: "",
+  buildings: [],
+  levels: [],
+  units: [],
+  rooms: [],
+  defaultDueDays: 7,
+});
+
+function projectConfigFor(settings: Settings, projectName: string): ProjectConfig {
+  return settings.projectConfigs[projectName] ?? fallbackConfig(projectName);
+}
+
+function subcontractorEmail(settings: Settings, subName: string): string {
+  return settings.subProfiles[subName]?.email?.trim() ?? "";
+}
+
 const emptyDraft = (project: string, dueDays: number): Draft => ({
   project,
   building: "",
@@ -63,11 +81,12 @@ function addDays(d: number) {
 
 function CapturePage() {
   const settings = useSettings();
-  const cfg = activeProjectConfig(settings);
+  const activeCfg = activeProjectConfig(settings);
   const navigate = useNavigate();
   const [walk, setWalk] = useState(false);
   const [walkCount, setWalkCount] = useState(0);
-  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject, cfg.defaultDueDays));
+  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject, activeCfg.defaultDueDays));
+  const cfg = projectConfigFor(settings, draft.project);
   const cameraRef = useRef<HTMLInputElement>(null);
   const libRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +102,19 @@ function CapturePage() {
 
   function update<K extends keyof Draft>(k: K, v: Draft[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
+  }
+
+  function updateProject(project: string) {
+    const nextCfg = projectConfigFor(settings, project);
+    setDraft((d) => ({
+      ...d,
+      project,
+      building: "",
+      level: "",
+      unit: "",
+      room: "",
+      dueDate: addDays(nextCfg.defaultDueDays),
+    }));
   }
 
   const subOptions = useMemo(() => {
@@ -226,7 +258,7 @@ function CapturePage() {
     });
 
     if (next === "issue") {
-      issueByMail(created.id, draft);
+      issueByMail(created, draft, settings);
       navigate({ to: "/items/$id", params: { id: created.id } });
       return;
     }
@@ -236,7 +268,6 @@ function CapturePage() {
     }
     setWalkCount((c) => c + 1);
     toast.success(`Saved ${created.code}`);
-    // Walk capture: keep project/building/level/unit/trade/sub; clear photos + description + room.
     setDraft((d) => ({
       ...d,
       description: "",
@@ -262,7 +293,6 @@ function CapturePage() {
         </button>
       }
     >
-      {/* Photo block */}
       <div className="rounded-2xl border border-border bg-card p-4">
         <div className="grid grid-cols-2 gap-2">
           <button
@@ -349,14 +379,12 @@ function CapturePage() {
         </div>
       </div>
 
-      {/* Type toggle — three types */}
       <div className="mt-4 grid grid-cols-3 gap-2">
         <TypeChip active={draft.type === "defect"} onClick={() => update("type", "defect")} label="Defect" />
         <TypeChip active={draft.type === "incomplete"} onClick={() => update("type", "incomplete")} label="Incomplete" />
         <TypeChip active={draft.type === "client"} onClick={() => update("type", "client")} label="Client Defect" />
       </div>
 
-      {/* Client-specific */}
       {draft.type === "client" && (
         <Section title="Client defect source">
           <Selectish
@@ -369,18 +397,16 @@ function CapturePage() {
         </Section>
       )}
 
-      {/* Location */}
       <Section title="Location">
-        <Selectish label="Project" value={draft.project} onChange={(v) => update("project", v)} options={settings.projects} />
+        <Selectish label="Project" value={draft.project} onChange={updateProject} options={settings.projects} />
         <div className="grid grid-cols-3 gap-2">
           <Selectish label="Building *" value={draft.building} onChange={(v) => update("building", v)} options={cfg.buildings} placeholder="Building" allowFree />
           <Selectish label="Level" value={draft.level} onChange={(v) => update("level", v)} options={cfg.levels} placeholder="Level" allowFree />
-          <Field label="Unit *"><Input value={draft.unit} onChange={(e) => update("unit", e.target.value)} placeholder="e.g. 304" /></Field>
+          <Selectish label="Unit *" value={draft.unit} onChange={(v) => update("unit", v)} options={cfg.units} placeholder="Unit" allowFree />
         </div>
         <Selectish label="Room / Location" value={draft.room} onChange={(v) => update("room", v)} options={cfg.rooms} placeholder="Room" allowFree />
       </Section>
 
-      {/* Assign */}
       <Section title="Assign">
         <div className="grid grid-cols-2 gap-2">
           <Selectish label="Trade" value={draft.trade} onChange={(v) => update("trade", v)} options={TRADES} placeholder="Select trade" />
@@ -392,7 +418,6 @@ function CapturePage() {
         </div>
       </Section>
 
-      {/* Description */}
       <Section title="Description">
         <Textarea
           value={draft.description}
@@ -402,7 +427,6 @@ function CapturePage() {
         />
       </Section>
 
-      {/* Save actions */}
       <div className="sticky bottom-20 z-20 mt-6 lg:bottom-4">
         <div className="rounded-2xl border border-border bg-card/95 p-2 shadow-lg backdrop-blur">
           <div className="grid grid-cols-3 gap-2">
@@ -485,24 +509,41 @@ function Selectish({ label, value, onChange, options, placeholder, allowFree }: 
   );
 }
 
-function issueByMail(id: string, d: Draft) {
-  const subject = `[CleanRun IQ] ${d.type === "defect" ? "Defect" : d.type === "client" ? "Client Defect" : "Incomplete Work"} — ${d.building} ${d.unit} ${d.room}`;
+function issueByMail(item: Item, d: Draft, settings: Settings) {
+  const typeLabel = TYPE_LABEL[item.type];
+  const email = subcontractorEmail(settings, d.subcontractor);
+  if (!email) toast.warning("No email set for this subcontractor.");
+
+  const subject = `[CleanRun IQ] ${item.code} ${typeLabel} — ${d.building} ${d.unit} ${d.room}`;
+  const itemUrl = typeof window !== "undefined" ? `${window.location.origin}/items/${item.id}` : `/items/${item.id}`;
   const body = [
     `Project: ${d.project}`,
-    `Location: ${d.building} / ${d.level} / ${d.unit} / ${d.room}`,
+    `Item code: ${item.code}`,
+    `Type: ${typeLabel}`,
+    `Location: ${d.building} / ${d.level || "—"} / ${d.unit} / ${d.room || "—"}`,
     `Trade: ${d.trade}`,
     `Priority: ${d.priority}`,
-    `Due: ${d.dueDate}`,
+    `Due date: ${d.dueDate}`,
     d.raisedBy ? `Raised by: ${d.raisedBy}` : "",
     "",
+    "Description:",
     d.description,
     "",
-    `View item: ${typeof window !== "undefined" ? window.location.origin : ""}/items/${id}`,
+    `Link to item: ${itemUrl}`,
+    "",
+    "Instruction: Please upload rectification evidence and mark ready for review once complete.",
     "",
     "— Issued via CleanRun IQ",
   ].filter(Boolean).join("\n");
-  itemsStore.issue(id, { to: d.subcontractor || "subcontractor" });
+
+  itemsStore.issue(item.id, {
+    to: d.subcontractor,
+    by: settings.preparedBy,
+    note: "Issued from Capture Issue Now.",
+    reissue: false,
+  });
+
   if (typeof window !== "undefined") {
-    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   }
 }
