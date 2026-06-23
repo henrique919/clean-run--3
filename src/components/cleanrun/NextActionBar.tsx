@@ -1,4 +1,4 @@
-import { CheckCircle2, Mail, Send, Undo2 } from "lucide-react";
+import { CheckCircle2, Mail, Send, Undo2, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Item, ItemStatus } from "@/lib/types";
 
@@ -42,7 +42,7 @@ type Handlers = {
 };
 
 function nextButtons(status: ItemStatus, incomplete: boolean, h: Handlers) {
-  const buttons: { label: string; onClick: () => void; primary?: boolean; danger?: boolean; icon?: typeof Mail }[] = [];
+  const buttons: { label: string; onClick: () => void; primary?: boolean; danger?: boolean; icon?: LucideIcon }[] = [];
   if (status === "open") buttons.push({ label: "Issue to subcontractor", onClick: h.onIssue, primary: true, icon: Mail });
   if (status === "issued") {
     buttons.push({ label: "Mark in progress", onClick: h.onMarkProgress, primary: true });
