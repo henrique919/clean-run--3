@@ -10,14 +10,14 @@ export const Route = createFileRoute("/reports")({
   component: ReportsPage,
 });
 
-const reportTypes = [
+const reportTypes: { key: string; label: string; featured?: boolean }[] = [
   { key: "open", label: "Open Items Report" },
   { key: "overdue", label: "Overdue Items Report" },
   { key: "closed", label: "Closed / Handover Evidence Report", featured: true },
   { key: "subcontractor", label: "Subcontractor Report" },
   { key: "client", label: "Client Defects Report" },
   { key: "incomplete", label: "Incomplete Works Report" },
-] as const;
+];
 
 function ReportsPage() {
   const items = useItems();
