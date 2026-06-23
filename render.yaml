@@ -1,13 +1,15 @@
 services:
   - type: web
     name: cleanrun-iq
-    env: node
+    runtime: static
     plan: free
-    buildCommand: NITRO_PRESET=node-server npm install && NITRO_PRESET=node-server npm run build
-    startCommand: npm run start
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist/client
     autoDeploy: true
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
     envVars:
       - key: NODE_VERSION
         value: 22
-      - key: NITRO_PRESET
-        value: node-server
