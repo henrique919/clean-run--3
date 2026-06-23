@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { AuditEvent, Closeout, CloseoutEvidence, Comment, InspectionEvent, IssueEvent, Item, ItemStatus, ItemType, Priority, ProjectConfig, RectificationEvidence, SubProfile } from "./types";
 import { CODE_PREFIX, makeId, nextCode } from "./types";
+import { buildDemoSeedItems } from "./demo-seed";
 
 const KEY = "cleanrun-iq:items:v5";
 const LEGACY_ITEM_KEYS = ["cleanrun-iq:items:v4", "cleanrun-iq:items:v3"];
@@ -41,18 +42,18 @@ const DEFAULT_SUBS = [
   "Endeavour Cleaning",
 ];
 
-const DEFAULT_SUB_PROFILES: Record<string, SubProfile> = Object.fromEntries(DEFAULT_SUBS.map((name) => [name, { name, trade: tradeGuess(name), contact: "", email: `${name.toLowerCase().replace(/[^a-z]+/g, "")}@example.com`, phone: "" } satisfies SubProfile]));
+const DEFAULT_SUB_PROFILES: Record<string, SubProfile> = Object.fromEntries(DEFAULT_SUBS.map((name) => [name, { name, trade: tradeGuess(name), contact: "Demo Contact", email: `${name.toLowerCase().replace(/[^a-z]+/g, "")}@example.com`, phone: "" } satisfies SubProfile]));
 
 const DEFAULT_SETTINGS: Settings = {
   projects: ["Jura Noosa", "Meta Street"],
   projectConfigs: {
-    "Jura Noosa": { ...DEFAULT_PROJECT_CONFIG("Jura Noosa"), address: "12 Hastings St, Noosa Heads", buildings: ["Block A", "Block B"] },
-    "Meta Street": { ...DEFAULT_PROJECT_CONFIG("Meta Street"), address: "88 Meta St, Mooloolaba", buildings: ["Tower 1"], levels: ["L01", "L02", "L05", "L08", "L10"] },
+    "Jura Noosa": { ...DEFAULT_PROJECT_CONFIG("Jura Noosa"), address: "Demo project · Noosa", buildings: ["Block A", "Block B"], levels: ["L01", "L02", "L03"], units: ["A-304", "A-305", "B-112", "B-204"] },
+    "Meta Street": { ...DEFAULT_PROJECT_CONFIG("Meta Street"), address: "Demo project · Mooloolaba", buildings: ["Tower 1"], levels: ["L01", "L02", "L05", "L08", "L10"], units: ["T1-502", "T1-803", "T1-1004"] },
   },
   subcontractors: DEFAULT_SUBS,
   subProfiles: DEFAULT_SUB_PROFILES,
   activeProject: "Jura Noosa",
-  company: "CleanRun Construction",
+  company: "CleanRun Construction Demo",
   preparedBy: "Site Manager",
 };
 
@@ -139,9 +140,9 @@ function normaliseCloseoutEvidence(input: unknown): CloseoutEvidence[] {
 }
 
 function closeoutMirror(evidence: CloseoutEvidence[]): Closeout | undefined {
-  const withPhoto = evidence.find((e) => e.photo);
-  if (!withPhoto?.photo) return undefined;
-  return { photo: withPhoto.photo, signedBy: withPhoto.by, role: withPhoto.role, note: withPhoto.note, signedAt: withPhoto.at };
+  const first = evidence[0];
+  if (!first) return undefined;
+  return { photo: first.photo, signedBy: first.by, role: first.role, note: first.note, signedAt: first.at };
 }
 
 function migrateItem(raw: unknown, idx: number): Item {
@@ -152,9 +153,7 @@ function migrateItem(raw: unknown, idx: number): Item {
   const rectificationEvidence: RectificationEvidence[] = Array.isArray(i.rectificationEvidence) ? (i.rectificationEvidence as RectificationEvidence[]) : [];
   let closeoutEvidence = normaliseCloseoutEvidence(i.closeoutEvidence);
   const legacyCloseout = i.closeout as Closeout | undefined;
-  if (closeoutEvidence.length === 0 && legacyCloseout) {
-    closeoutEvidence = [{ id: makeId(), photo: legacyCloseout.photo || undefined, by: legacyCloseout.signedBy || "Site Manager", role: legacyCloseout.role || "Site Manager", note: legacyCloseout.note, at: legacyCloseout.signedAt || now }];
-  }
+  if (closeoutEvidence.length === 0 && legacyCloseout) closeoutEvidence = [{ id: makeId(), photo: legacyCloseout.photo || undefined, by: legacyCloseout.signedBy || "Site Manager", role: legacyCloseout.role || "Site Manager", note: legacyCloseout.note, at: legacyCloseout.signedAt || now }];
   const auditEvents: AuditEvent[] = Array.isArray(i.auditEvents) ? (i.auditEvents as AuditEvent[]) : Array.isArray(i.history) ? (i.history as AuditEvent[]) : [{ at: now, action: "Created" }];
 
   const item: Item = {
@@ -244,27 +243,10 @@ function loadSettings(): Settings {
   }
 }
 
-function placeholderPhoto(label: string, hue: number): string {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><rect width='200' height='200' fill='hsl(${hue},35%,82%)'/><text x='100' y='108' text-anchor='middle' font-family='Inter,system-ui,sans-serif' font-weight='600' font-size='22' fill='hsl(${hue},40%,30%)'>${label}</text></svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
 function seedItems(): Item[] {
-  const now = new Date().toISOString();
-  const seed: Item[] = [
-    makeSeed({ type: "defect", code: "DEF-001", project: "Jura Noosa", building: "Block A", level: "L03", unit: "A-304", room: "Ensuite", trade: "Tiling", subcontractor: "Sterling Tiling", priority: "urgent", dueDate: addDays(-2), description: "Cracked floor tile under vanity. Replace and re-grout.", status: "issued", photo: placeholderPhoto("Tile", 12), issuedAt: now }),
-    makeSeed({ type: "incomplete", code: "INC-001", project: "Jura Noosa", building: "Block A", level: "L03", unit: "A-305", room: "Kitchen", trade: "Joinery", subcontractor: "TrueLine Joinery", priority: "high", dueDate: addDays(4), description: "Pantry door not yet installed. Hardware on site.", status: "open", photo: placeholderPhoto("Joinery", 35) }),
-    makeSeed({ type: "client", code: "CLD-001", project: "Meta Street", building: "Tower 1", level: "L10", unit: "T1-1004", room: "Ensuite", trade: "Cleaning", subcontractor: "Endeavour Cleaning", priority: "high", dueDate: addDays(2), description: "Grout haze on shower wall tiles. Re-clean.", status: "open", photo: placeholderPhoto("Clean", 190), raisedBy: "Superintendent" }),
-  ];
+  const seed = buildDemoSeedItems().map(syncLegacyMirrors);
   if (isBrowser) localStorage.setItem(KEY, JSON.stringify(seed));
   return seed;
-}
-
-function makeSeed(input: Omit<Item, "id" | "createdAt" | "updatedAt" | "createdBy" | "originalPhotos" | "rectificationEvidence" | "closeoutEvidence" | "comments" | "issueHistory" | "inspectionHistory" | "auditEvents" | "photos" | "history"> & { photo: string }): Item {
-  const now = new Date().toISOString();
-  const issueHistory: IssueEvent[] = input.issuedAt ? [{ at: input.issuedAt, to: input.subcontractor, by: "Site Manager" }] : [];
-  const auditEvents: AuditEvent[] = [{ at: now, action: `Created (${input.code})`, by: "Site Manager" }, ...issueHistory.map((e) => ({ at: e.at, action: `Issued to ${e.to}`, by: e.by }))];
-  return { ...input, id: makeId(), createdAt: now, updatedAt: now, createdBy: "Site Manager", originalPhotos: [input.photo], rectificationEvidence: [], closeoutEvidence: [], comments: [], issueHistory, inspectionHistory: [], auditEvents, photos: [input.photo], history: auditEvents };
 }
 
 const listeners = new Set<() => void>();
@@ -274,9 +256,7 @@ let settingsCache: Settings | null = null;
 function getItemsSnapshot(): Item[] { if (itemsCache === null) itemsCache = loadItems(); return itemsCache; }
 function getSettingsSnapshot(): Settings { if (settingsCache === null) settingsCache = loadSettings(); return settingsCache; }
 
-function syncLegacyMirrors(item: Item): Item {
-  return { ...item, photos: item.originalPhotos, closeout: closeoutMirror(item.closeoutEvidence), history: item.auditEvents };
-}
+function syncLegacyMirrors(item: Item): Item { return { ...item, photos: item.originalPhotos, closeout: closeoutMirror(item.closeoutEvidence), history: item.auditEvents }; }
 function saveItems(items: Item[]) { const synced = items.map(syncLegacyMirrors); if (isBrowser) localStorage.setItem(KEY, JSON.stringify(synced)); itemsCache = synced; listeners.forEach((l) => l()); }
 function saveSettings(s: Settings) { const settings = normaliseSettings(s); if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); settingsCache = settings; listeners.forEach((l) => l()); }
 function patchItem(id: string, mutator: (it: Item) => Item) { saveItems(loadItems().map((it) => (it.id === id ? mutator({ ...it }) : it))); }
