@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { activeProjectConfig, itemsStore, type Settings, useSettings } from "@/lib/store";
-import { RAISED_BY_OPTIONS, TRADES, TYPE_LABEL, type Item, type ItemType, type Priority, type ProjectConfig } from "@/lib/types";
+import { buildIssueEmail, openMailto, projectConfigFor, subcontractorEmail } from "@/lib/cleanrun-utils";
+import { itemsStore, type Settings, useSettings } from "@/lib/store";
+import { RAISED_BY_OPTIONS, TRADES, type Item, type ItemType, type Priority } from "@/lib/types";
 import { transcribeAndExtract } from "@/lib/voice.functions";
 import { cn } from "@/lib/utils";
 
@@ -39,24 +40,6 @@ interface Draft {
   raisedBy: string;
 }
 
-const fallbackConfig = (projectName: string): ProjectConfig => ({
-  name: projectName,
-  address: "",
-  buildings: [],
-  levels: [],
-  units: [],
-  rooms: [],
-  defaultDueDays: 7,
-});
-
-function projectConfigFor(settings: Settings, projectName: string): ProjectConfig {
-  return settings.projectConfigs[projectName] ?? fallbackConfig(projectName);
-}
-
-function subcontractorEmail(settings: Settings, subName: string): string {
-  return settings.subProfiles[subName]?.email?.trim() ?? "";
-}
-
 const emptyDraft = (project: string, dueDays: number): Draft => ({
   project,
   building: "",
@@ -81,11 +64,11 @@ function addDays(d: number) {
 
 function CapturePage() {
   const settings = useSettings();
-  const activeCfg = activeProjectConfig(settings);
+  const initialCfg = projectConfigFor(settings, settings.activeProject);
   const navigate = useNavigate();
   const [walk, setWalk] = useState(false);
   const [walkCount, setWalkCount] = useState(0);
-  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject, activeCfg.defaultDueDays));
+  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject, initialCfg.defaultDueDays));
   const cfg = projectConfigFor(settings, draft.project);
   const cameraRef = useRef<HTMLInputElement>(null);
   const libRef = useRef<HTMLInputElement>(null);
@@ -106,15 +89,7 @@ function CapturePage() {
 
   function updateProject(project: string) {
     const nextCfg = projectConfigFor(settings, project);
-    setDraft((d) => ({
-      ...d,
-      project,
-      building: "",
-      level: "",
-      unit: "",
-      room: "",
-      dueDate: addDays(nextCfg.defaultDueDays),
-    }));
+    setDraft((d) => ({ ...d, project, building: "", level: "", unit: "", room: "", dueDate: addDays(nextCfg.defaultDueDays) }));
   }
 
   const subOptions = useMemo(() => {
@@ -168,15 +143,7 @@ function CapturePage() {
       const CHUNK = 0x8000;
       for (let i = 0; i < u8.length; i += CHUNK) bin += String.fromCharCode(...u8.subarray(i, i + CHUNK));
       const audioBase64 = btoa(bin);
-      const result = await transcribe({
-        data: {
-          audioBase64,
-          mimeType: blob.type || "audio/webm",
-          projects: settings.projects,
-          trades: TRADES,
-          subcontractors: settings.subcontractors,
-        },
-      });
+      const result = await transcribe({ data: { audioBase64, mimeType: blob.type || "audio/webm", projects: settings.projects, trades: TRADES, subcontractors: settings.subcontractors } });
       setTranscript(result.transcript);
       const f = result.fields || {};
       setDraft((d) => ({
@@ -201,13 +168,7 @@ function CapturePage() {
 
   async function handleFiles(files: FileList | null) {
     if (!files) return;
-    const arr = await Promise.all(
-      Array.from(files).map((f) => new Promise<string>((res) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result as string);
-        r.readAsDataURL(f);
-      })),
-    );
+    const arr = await Promise.all(Array.from(files).map((f) => new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsDataURL(f); })));
     setDraft((d) => ({ ...d, photos: [...d.photos, ...arr] }));
   }
 
@@ -215,30 +176,21 @@ function CapturePage() {
     if (!draft.description.trim()) return { ok: false, message: "Add a short description before saving." };
     if (!draft.project) return { ok: false, message: "Select a project." };
     if (!draft.building.trim() || !draft.unit.trim()) return { ok: false, message: "Building and Unit are required." };
-
     const requiresPhoto = draft.type === "defect" || draft.type === "client";
-    if (requiresPhoto && draft.photos.length === 0) {
-      return { ok: false, message: `A ${draft.type === "client" ? "client defect" : "defect"} cannot be saved without at least one original photo.` };
-    }
-    if (draft.type === "client" && !draft.raisedBy) {
-      return { ok: false, message: "Client defects require a Raised By source." };
-    }
+    if (requiresPhoto && draft.photos.length === 0) return { ok: false, message: `A ${draft.type === "client" ? "client defect" : "defect"} cannot be saved without at least one original photo.` };
+    if (draft.type === "client" && !draft.raisedBy) return { ok: false, message: "Client defects require a Raised By source." };
     if (intent === "issue") {
       if (!draft.trade) return { ok: false, message: "Select a trade before issuing." };
       if (!draft.subcontractor) return { ok: false, message: "Select a subcontractor before issuing." };
     }
-    if (draft.type === "incomplete" && draft.photos.length === 0) {
-      return { ok: true, warn: "No photo added. Incomplete works can be saved without a photo, but evidence is recommended." };
-    }
+    if (draft.type === "incomplete" && draft.photos.length === 0) return { ok: true, warn: "No photo added. Incomplete works can be saved without a photo, but evidence is recommended." };
     return { ok: true };
   }
 
   function save(next: "issue" | "next" | "view" | "nextPhoto") {
     const v = validate(next === "issue" ? "issue" : "save");
     if (!v.ok) { toast.error(v.message ?? "Required information missing."); return; }
-    if (v.warn) {
-      if (!confirm(v.warn + "\n\nContinue saving without a photo?")) return;
-    }
+    if (v.warn && !confirm(v.warn + "\n\nContinue saving without a photo?")) return;
 
     const created = itemsStore.create({
       project: draft.project,
@@ -258,7 +210,7 @@ function CapturePage() {
     });
 
     if (next === "issue") {
-      issueByMail(created, draft, settings);
+      issueByMail(created, settings);
       navigate({ to: "/items/$id", params: { id: created.id } });
       return;
     }
@@ -268,282 +220,54 @@ function CapturePage() {
     }
     setWalkCount((c) => c + 1);
     toast.success(`Saved ${created.code}`);
-    setDraft((d) => ({
-      ...d,
-      description: "",
-      room: "",
-      photos: [],
-    }));
+    setDraft((d) => ({ ...d, description: "", room: "", photos: [] }));
     if (next === "nextPhoto") setTimeout(() => cameraRef.current?.click(), 50);
   }
 
   return (
-    <AppShell
-      title="Capture Item"
-      subtitle="Photo first. Assign. Issue. Close."
-      action={
-        <button
-          onClick={() => setWalk((w) => !w)}
-          className={cn(
-            "rounded-full border px-3 py-1.5 text-xs font-medium transition",
-            walk ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-foreground",
-          )}
-        >
-          {walk ? `Walk · ${walkCount} captured` : "Walk Capture"}
-        </button>
-      }
-    >
+    <AppShell title="Capture Item" subtitle="Photo first. Assign. Issue. Close." action={<button onClick={() => setWalk((w) => !w)} className={cn("rounded-full border px-3 py-1.5 text-xs font-medium transition", walk ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-foreground")}>{walk ? `Walk · ${walkCount} captured` : "Walk Capture"}</button>}>
       <div className="rounded-2xl border border-border bg-card p-4">
         <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => cameraRef.current?.click()}
-            className="flex flex-col items-center justify-center gap-2 rounded-xl bg-primary px-4 py-5 text-primary-foreground transition hover:brightness-110"
-          >
-            <Camera className="h-7 w-7" />
-            <span className="text-sm font-medium">Take Photo</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => libRef.current?.click()}
-            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 py-5 transition hover:bg-accent"
-          >
-            <Images className="h-7 w-7 text-primary" />
-            <span className="text-sm font-medium">Camera Roll</span>
-          </button>
+          <button type="button" onClick={() => cameraRef.current?.click()} className="flex flex-col items-center justify-center gap-2 rounded-xl bg-primary px-4 py-5 text-primary-foreground transition hover:brightness-110"><Camera className="h-7 w-7" /><span className="text-sm font-medium">Take Photo</span></button>
+          <button type="button" onClick={() => libRef.current?.click()} className="flex flex-col items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 py-5 transition hover:bg-accent"><Images className="h-7 w-7 text-primary" /><span className="text-sm font-medium">Camera Roll</span></button>
         </div>
-        <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden"
-          onChange={(e) => handleFiles(e.target.files)} />
-        <input ref={libRef} type="file" accept="image/*" multiple className="hidden"
-          onChange={(e) => handleFiles(e.target.files)} />
-
-        {draft.photos.length > 0 ? (
-          <div className="mt-3 flex gap-2 overflow-x-auto">
-            {draft.photos.map((p, i) => (
-              <div key={i} className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg">
-                <img src={p} alt="" className="h-full w-full object-cover" />
-                <button
-                  type="button"
-                  onClick={() => setDraft((d) => ({ ...d, photos: d.photos.filter((_, j) => j !== i) }))}
-                  className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-background/90"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          (draft.type === "defect" || draft.type === "client") && (
-            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-              <AlertTriangle className="h-3 w-3" />
-              At least one original photo is required for {draft.type === "client" ? "client defects" : "defects"}.
-            </p>
-          )
-        )}
-
-        <div className="mt-3 rounded-xl border border-dashed border-border bg-background/40 p-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 text-sm font-medium">
-                <Sparkles className="h-3.5 w-3.5 text-primary" />
-                Voice note → auto-fill
-              </div>
-              <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                e.g. "Building 3, Unit 301, Laundry, tiling needs to be rectified, ASTW Tiling to action."
-              </p>
-            </div>
-            {!recording ? (
-              <button
-                type="button"
-                onClick={startRecording}
-                disabled={processing}
-                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:brightness-110 disabled:opacity-60"
-              >
-                {processing ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> Transcribing…</>) : (<><Mic className="h-3.5 w-3.5" /> Record</>)}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={stopRecording}
-                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-red-600 px-4 text-xs font-semibold text-white animate-pulse"
-              >
-                <Square className="h-3.5 w-3.5 fill-current" /> Stop
-              </button>
-            )}
-          </div>
-          {transcript && (
-            <p className="mt-2 rounded-md bg-muted/50 p-2 text-[11px] italic text-muted-foreground">
-              "{transcript}"
-            </p>
-          )}
-        </div>
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+        <input ref={libRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+        {draft.photos.length > 0 ? <div className="mt-3 flex gap-2 overflow-x-auto">{draft.photos.map((p, i) => <div key={i} className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg"><img src={p} alt="" className="h-full w-full object-cover" /><button type="button" onClick={() => setDraft((d) => ({ ...d, photos: d.photos.filter((_, j) => j !== i) }))} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-background/90"><X className="h-3 w-3" /></button></div>)}</div> : (draft.type === "defect" || draft.type === "client") && <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300"><AlertTriangle className="h-3 w-3" />At least one original photo is required for {draft.type === "client" ? "client defects" : "defects"}.</p>}
+        <div className="mt-3 rounded-xl border border-dashed border-border bg-background/40 p-3"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-1.5 text-sm font-medium"><Sparkles className="h-3.5 w-3.5 text-primary" />Voice note → auto-fill</div><p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">e.g. "Building 3, Unit 301, Laundry, tiling needs to be rectified, ASTW Tiling to action."</p></div>{!recording ? <button type="button" onClick={startRecording} disabled={processing} className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:brightness-110 disabled:opacity-60">{processing ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Transcribing…</> : <><Mic className="h-3.5 w-3.5" /> Record</>}</button> : <button type="button" onClick={stopRecording} className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-red-600 px-4 text-xs font-semibold text-white animate-pulse"><Square className="h-3.5 w-3.5 fill-current" /> Stop</button>}</div>{transcript && <p className="mt-2 rounded-md bg-muted/50 p-2 text-[11px] italic text-muted-foreground">"{transcript}"</p>}</div>
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-2">
-        <TypeChip active={draft.type === "defect"} onClick={() => update("type", "defect")} label="Defect" />
-        <TypeChip active={draft.type === "incomplete"} onClick={() => update("type", "incomplete")} label="Incomplete" />
-        <TypeChip active={draft.type === "client"} onClick={() => update("type", "client")} label="Client Defect" />
-      </div>
-
-      {draft.type === "client" && (
-        <Section title="Client defect source">
-          <Selectish
-            label="Raised by *"
-            value={draft.raisedBy}
-            onChange={(v) => update("raisedBy", v)}
-            options={[...RAISED_BY_OPTIONS]}
-            placeholder="Who raised this?"
-          />
-        </Section>
-      )}
-
-      <Section title="Location">
-        <Selectish label="Project" value={draft.project} onChange={updateProject} options={settings.projects} />
-        <div className="grid grid-cols-3 gap-2">
-          <Selectish label="Building *" value={draft.building} onChange={(v) => update("building", v)} options={cfg.buildings} placeholder="Building" allowFree />
-          <Selectish label="Level" value={draft.level} onChange={(v) => update("level", v)} options={cfg.levels} placeholder="Level" allowFree />
-          <Selectish label="Unit *" value={draft.unit} onChange={(v) => update("unit", v)} options={cfg.units} placeholder="Unit" allowFree />
-        </div>
-        <Selectish label="Room / Location" value={draft.room} onChange={(v) => update("room", v)} options={cfg.rooms} placeholder="Room" allowFree />
-      </Section>
-
-      <Section title="Assign">
-        <div className="grid grid-cols-2 gap-2">
-          <Selectish label="Trade" value={draft.trade} onChange={(v) => update("trade", v)} options={TRADES} placeholder="Select trade" />
-          <Selectish label="Subcontractor" value={draft.subcontractor} onChange={(v) => update("subcontractor", v)} options={subOptions} placeholder="Select sub" />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["high", "urgent"]} />
-          <Field label="Due date"><Input type="date" value={draft.dueDate} onChange={(e) => update("dueDate", e.target.value)} /></Field>
-        </div>
-      </Section>
-
-      <Section title="Description">
-        <Textarea
-          value={draft.description}
-          onChange={(e) => update("description", e.target.value)}
-          placeholder="Short, specific. e.g. 'Cracked tile under vanity, replace and regrout.'"
-          rows={4}
-        />
-      </Section>
-
-      <div className="sticky bottom-20 z-20 mt-6 lg:bottom-4">
-        <div className="rounded-2xl border border-border bg-card/95 p-2 shadow-lg backdrop-blur">
-          <div className="grid grid-cols-3 gap-2">
-            <Button variant="outline" onClick={() => save("view")}>Save</Button>
-            <Button variant="outline" onClick={() => save(walk ? "nextPhoto" : "next")}>
-              Save + Next{walk ? " Photo" : ""}
-            </Button>
-            <Button onClick={() => save("issue")}>Issue Now</Button>
-          </div>
-        </div>
-      </div>
+      <div className="mt-4 grid grid-cols-3 gap-2"><TypeChip active={draft.type === "defect"} onClick={() => update("type", "defect")} label="Defect" /><TypeChip active={draft.type === "incomplete"} onClick={() => update("type", "incomplete")} label="Incomplete" /><TypeChip active={draft.type === "client"} onClick={() => update("type", "client")} label="Client Defect" /></div>
+      {draft.type === "client" && <Section title="Client defect source"><Selectish label="Raised by *" value={draft.raisedBy} onChange={(v) => update("raisedBy", v)} options={[...RAISED_BY_OPTIONS]} placeholder="Who raised this?" /></Section>}
+      <Section title="Location"><Selectish label="Project" value={draft.project} onChange={updateProject} options={settings.projects} /><div className="grid grid-cols-3 gap-2"><Selectish label="Building *" value={draft.building} onChange={(v) => update("building", v)} options={cfg.buildings} placeholder="Building" allowFree /><Selectish label="Level" value={draft.level} onChange={(v) => update("level", v)} options={cfg.levels} placeholder="Level" allowFree /><Selectish label="Unit *" value={draft.unit} onChange={(v) => update("unit", v)} options={cfg.units} placeholder="Unit" allowFree /></div><Selectish label="Room / Location" value={draft.room} onChange={(v) => update("room", v)} options={cfg.rooms} placeholder="Room" allowFree /></Section>
+      <Section title="Assign"><div className="grid grid-cols-2 gap-2"><Selectish label="Trade" value={draft.trade} onChange={(v) => update("trade", v)} options={TRADES} placeholder="Select trade" /><Selectish label="Subcontractor" value={draft.subcontractor} onChange={(v) => update("subcontractor", v)} options={subOptions} placeholder="Select sub" /></div><div className="grid grid-cols-2 gap-2"><Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["high", "urgent"]} /><Field label="Due date"><Input type="date" value={draft.dueDate} onChange={(e) => update("dueDate", e.target.value)} /></Field></div></Section>
+      <Section title="Description"><Textarea value={draft.description} onChange={(e) => update("description", e.target.value)} placeholder="Short, specific. e.g. 'Cracked tile under vanity, replace and regrout.'" rows={4} /></Section>
+      <div className="sticky bottom-20 z-20 mt-6 lg:bottom-4"><div className="rounded-2xl border border-border bg-card/95 p-2 shadow-lg backdrop-blur"><div className="grid grid-cols-3 gap-2"><Button variant="outline" onClick={() => save("view")}>Save</Button><Button variant="outline" onClick={() => save(walk ? "nextPhoto" : "next")}>Save + Next{walk ? " Photo" : ""}</Button><Button onClick={() => save("issue")}>Issue Now</Button></div></div></div>
     </AppShell>
   );
 }
 
 function TypeChip({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "rounded-xl border px-3 py-3 text-sm font-medium transition",
-        active ? "border-primary bg-primary/5 text-primary" : "border-border bg-card text-muted-foreground",
-      )}
-    >
-      {label}
-    </button>
-  );
+  return <button type="button" onClick={onClick} className={cn("rounded-xl border px-3 py-3 text-sm font-medium transition", active ? "border-primary bg-primary/5 text-primary" : "border-border bg-card text-muted-foreground")}>{label}</button>;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="mt-4 space-y-2 rounded-2xl border border-border bg-card p-4">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
-      <div className="space-y-2">{children}</div>
-    </section>
-  );
+  return <section className="mt-4 space-y-2 rounded-2xl border border-border bg-card p-4"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3><div className="space-y-2">{children}</div></section>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</Label>
-      {children}
-    </div>
-  );
+  return <div className="space-y-1"><Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</Label>{children}</div>;
 }
 
-function Selectish({ label, value, onChange, options, placeholder, allowFree }: {
-  label: string; value: string; onChange: (v: string) => void; options: readonly string[]; placeholder?: string; allowFree?: boolean;
-}) {
+function Selectish({ label, value, onChange, options, placeholder, allowFree }: { label: string; value: string; onChange: (v: string) => void; options: readonly string[]; placeholder?: string; allowFree?: boolean }) {
   const showCustom = allowFree && value && !options.includes(value);
-  return (
-    <Field label={label}>
-      <div className="relative">
-        <select
-          value={showCustom ? "__custom__" : value}
-          onChange={(e) => {
-            if (e.target.value === "__custom__") return;
-            onChange(e.target.value);
-          }}
-          className="h-10 w-full appearance-none rounded-md border border-input bg-background px-3 pr-8 text-sm"
-        >
-          {!value && <option value="">{placeholder ?? "Select…"}</option>}
-          {options.map((o) => (<option key={o} value={o}>{o}</option>))}
-          {allowFree && <option value="__custom__">+ Custom…</option>}
-          {showCustom && <option value={value}>{value}</option>}
-        </select>
-        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-      </div>
-      {allowFree && (
-        <Input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={`or type ${label.toLowerCase().replace(" *", "")}`}
-          className="mt-1 h-8 text-xs"
-        />
-      )}
-    </Field>
-  );
+  return <Field label={label}><div className="relative"><select value={showCustom ? "__custom__" : value} onChange={(e) => { if (e.target.value === "__custom__") return; onChange(e.target.value); }} className="h-10 w-full appearance-none rounded-md border border-input bg-background px-3 pr-8 text-sm">{!value && <option value="">{placeholder ?? "Select…"}</option>}{options.map((o) => <option key={o} value={o}>{o}</option>)}{allowFree && <option value="__custom__">+ Custom…</option>}{showCustom && <option value={value}>{value}</option>}</select><ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /></div>{allowFree && <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder={`or type ${label.toLowerCase().replace(" *", "")}`} className="mt-1 h-8 text-xs" />}</Field>;
 }
 
-function issueByMail(item: Item, d: Draft, settings: Settings) {
-  const typeLabel = TYPE_LABEL[item.type];
-  const email = subcontractorEmail(settings, d.subcontractor);
+function issueByMail(item: Item, settings: Settings) {
+  const email = subcontractorEmail(settings, item.subcontractor);
   if (!email) toast.warning("No email set for this subcontractor.");
-
-  const subject = `[CleanRun IQ] ${item.code} ${typeLabel} — ${d.building} ${d.unit} ${d.room}`;
-  const itemUrl = typeof window !== "undefined" ? `${window.location.origin}/items/${item.id}` : `/items/${item.id}`;
-  const body = [
-    `Project: ${d.project}`,
-    `Item code: ${item.code}`,
-    `Type: ${typeLabel}`,
-    `Location: ${d.building} / ${d.level || "—"} / ${d.unit} / ${d.room || "—"}`,
-    `Trade: ${d.trade}`,
-    `Priority: ${d.priority}`,
-    `Due date: ${d.dueDate}`,
-    d.raisedBy ? `Raised by: ${d.raisedBy}` : "",
-    "",
-    "Description:",
-    d.description,
-    "",
-    `Link to item: ${itemUrl}`,
-    "",
-    "Instruction: Please upload rectification evidence and mark ready for review once complete.",
-    "",
-    "— Issued via CleanRun IQ",
-  ].filter(Boolean).join("\n");
-
-  itemsStore.issue(item.id, {
-    to: d.subcontractor,
-    by: settings.preparedBy,
-    note: "Issued from Capture Issue Now.",
-    reissue: false,
-  });
-
-  if (typeof window !== "undefined") {
-    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  }
+  const { subject, body } = buildIssueEmail(item);
+  itemsStore.issue(item.id, { to: item.subcontractor, by: settings.preparedBy, note: "Issued from Capture Issue Now.", reissue: false });
+  openMailto(email, subject, body);
 }
