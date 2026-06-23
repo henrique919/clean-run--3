@@ -1,15 +1,11 @@
 services:
   - type: web
     name: cleanrun-iq
-    runtime: static
+    env: node
     plan: free
     buildCommand: npm install && npm run build
-    staticPublishPath: ./dist/client
+    startCommand: npm run start
     autoDeploy: true
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
     envVars:
       - key: NODE_VERSION
         value: 22
