@@ -1,15 +1,15 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { Camera, Images, X, Mic, Square, Loader2, Sparkles, ChevronDown } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, Camera, ChevronDown, Images, Loader2, Mic, Sparkles, Square, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { itemsStore, useSettings } from "@/lib/store";
-import { TRADES, type ItemType, type Priority } from "@/lib/types";
+import { activeProjectConfig, itemsStore, useSettings } from "@/lib/store";
+import { RAISED_BY_OPTIONS, TRADES, type ItemType, type Priority } from "@/lib/types";
 import { transcribeAndExtract } from "@/lib/voice.functions";
 import { cn } from "@/lib/utils";
 
@@ -17,7 +17,7 @@ export const Route = createFileRoute("/capture")({
   head: () => ({
     meta: [
       { title: "Capture — CleanRun IQ" },
-      { name: "description", content: "Photo-first capture for defects and incomplete works." },
+      { name: "description", content: "Photo-first capture for defects, incomplete works and client defects." },
     ],
   }),
   component: CapturePage,
@@ -36,9 +36,10 @@ interface Draft {
   dueDate: string;
   description: string;
   photos: string[];
+  raisedBy: string;
 }
 
-const emptyDraft = (project: string): Draft => ({
+const emptyDraft = (project: string, dueDays: number): Draft => ({
   project,
   building: "",
   level: "",
@@ -48,9 +49,10 @@ const emptyDraft = (project: string): Draft => ({
   trade: "",
   subcontractor: "",
   priority: "high",
-  dueDate: addDays(7),
+  dueDate: addDays(dueDays),
   description: "",
   photos: [],
+  raisedBy: "",
 });
 
 function addDays(d: number) {
@@ -61,14 +63,14 @@ function addDays(d: number) {
 
 function CapturePage() {
   const settings = useSettings();
+  const cfg = activeProjectConfig(settings);
   const navigate = useNavigate();
   const [walk, setWalk] = useState(false);
   const [walkCount, setWalkCount] = useState(0);
-  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject));
+  const [draft, setDraft] = useState<Draft>(() => emptyDraft(settings.activeProject, cfg.defaultDueDays));
   const cameraRef = useRef<HTMLInputElement>(null);
   const libRef = useRef<HTMLInputElement>(null);
 
-  // Voice note state
   const [recording, setRecording] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [transcript, setTranscript] = useState<string>("");
@@ -77,15 +79,17 @@ function CapturePage() {
   const streamRef = useRef<MediaStream | null>(null);
   const transcribe = useServerFn(transcribeAndExtract);
 
-  useEffect(() => {
-    return () => {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-    };
-  }, []);
+  useEffect(() => () => { streamRef.current?.getTracks().forEach((t) => t.stop()); }, []);
 
   function update<K extends keyof Draft>(k: K, v: Draft[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
   }
+
+  const subOptions = useMemo(() => {
+    if (!draft.trade) return settings.subcontractors;
+    const filtered = settings.subcontractors.filter((s) => settings.subProfiles[s]?.trade === draft.trade);
+    return filtered.length ? filtered : settings.subcontractors;
+  }, [draft.trade, settings.subcontractors, settings.subProfiles]);
 
   function pickMime(): string | undefined {
     if (typeof MediaRecorder === "undefined") return undefined;
@@ -96,25 +100,17 @@ function CapturePage() {
   async function startRecording() {
     try {
       const mimeType = pickMime();
-      if (!mimeType) {
-        toast.error("This browser can't record a supported audio format.");
-        return;
-      }
+      if (!mimeType) { toast.error("This browser can't record a supported audio format."); return; }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const rec = new MediaRecorder(stream, { mimeType });
       chunksRef.current = [];
-      rec.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
       rec.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
         const blob = new Blob(chunksRef.current, { type: rec.mimeType });
-        if (blob.size < 1024) {
-          toast.error("That recording was empty — please try again.");
-          return;
-        }
+        if (blob.size < 1024) { toast.error("That recording was empty — please try again."); return; }
         await sendForTranscription(blob);
       };
       rec.start();
@@ -135,13 +131,10 @@ function CapturePage() {
     setProcessing(true);
     try {
       const buf = await blob.arrayBuffer();
-      // Chunked base64 conversion to avoid stack overflow
       const u8 = new Uint8Array(buf);
       let bin = "";
       const CHUNK = 0x8000;
-      for (let i = 0; i < u8.length; i += CHUNK) {
-        bin += String.fromCharCode(...u8.subarray(i, i + CHUNK));
-      }
+      for (let i = 0; i < u8.length; i += CHUNK) bin += String.fromCharCode(...u8.subarray(i, i + CHUNK));
       const audioBase64 = btoa(bin);
       const result = await transcribe({
         data: {
@@ -177,23 +170,44 @@ function CapturePage() {
   async function handleFiles(files: FileList | null) {
     if (!files) return;
     const arr = await Promise.all(
-      Array.from(files).map(
-        (f) =>
-          new Promise<string>((res) => {
-            const r = new FileReader();
-            r.onload = () => res(r.result as string);
-            r.readAsDataURL(f);
-          }),
-      ),
+      Array.from(files).map((f) => new Promise<string>((res) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result as string);
+        r.readAsDataURL(f);
+      })),
     );
     setDraft((d) => ({ ...d, photos: [...d.photos, ...arr] }));
   }
 
-  function save(next: "issue" | "next" | "view" | "nextPhoto") {
-    if (!draft.description.trim()) {
-      alert("Add a short description before saving.");
-      return;
+  function validate(intent: "issue" | "save"): { ok: boolean; message?: string; warn?: string } {
+    if (!draft.description.trim()) return { ok: false, message: "Add a short description before saving." };
+    if (!draft.project) return { ok: false, message: "Select a project." };
+    if (!draft.building.trim() || !draft.unit.trim()) return { ok: false, message: "Building and Unit are required." };
+
+    const requiresPhoto = draft.type === "defect" || draft.type === "client";
+    if (requiresPhoto && draft.photos.length === 0) {
+      return { ok: false, message: `A ${draft.type === "client" ? "client defect" : "defect"} cannot be saved without at least one original photo.` };
     }
+    if (draft.type === "client" && !draft.raisedBy) {
+      return { ok: false, message: "Client defects require a Raised By source." };
+    }
+    if (intent === "issue") {
+      if (!draft.trade) return { ok: false, message: "Select a trade before issuing." };
+      if (!draft.subcontractor) return { ok: false, message: "Select a subcontractor before issuing." };
+    }
+    if (draft.type === "incomplete" && draft.photos.length === 0) {
+      return { ok: true, warn: "No photo added. Incomplete works can be saved without a photo, but evidence is recommended." };
+    }
+    return { ok: true };
+  }
+
+  function save(next: "issue" | "next" | "view" | "nextPhoto") {
+    const v = validate(next === "issue" ? "issue" : "save");
+    if (!v.ok) { toast.error(v.message ?? "Required information missing."); return; }
+    if (v.warn) {
+      if (!confirm(v.warn + "\n\nContinue saving without a photo?")) return;
+    }
+
     const created = itemsStore.create({
       project: draft.project,
       building: draft.building,
@@ -206,11 +220,13 @@ function CapturePage() {
       priority: draft.priority,
       dueDate: draft.dueDate,
       description: draft.description,
-      photos: draft.photos,
+      originalPhotos: draft.photos,
+      raisedBy: draft.type === "client" ? draft.raisedBy : undefined,
+      createdBy: settings.preparedBy,
     });
 
     if (next === "issue") {
-      issueItem(created.id, draft);
+      issueByMail(created.id, draft);
       navigate({ to: "/items/$id", params: { id: created.id } });
       return;
     }
@@ -218,12 +234,14 @@ function CapturePage() {
       navigate({ to: "/items/$id", params: { id: created.id } });
       return;
     }
-    // Walk capture: keep location context, clear photos + description
     setWalkCount((c) => c + 1);
+    toast.success(`Saved ${created.code}`);
+    // Walk capture: keep project/building/level/unit/trade/sub; clear photos + description + room.
     setDraft((d) => ({
       ...d,
       description: "",
-      photos: next === "nextPhoto" ? [] : d.photos.length ? [] : [],
+      room: "",
+      photos: [],
     }));
     if (next === "nextPhoto") setTimeout(() => cameraRef.current?.click(), 50);
   }
@@ -237,9 +255,7 @@ function CapturePage() {
           onClick={() => setWalk((w) => !w)}
           className={cn(
             "rounded-full border px-3 py-1.5 text-xs font-medium transition",
-            walk
-              ? "border-primary bg-primary text-primary-foreground"
-              : "border-border bg-card text-foreground",
+            walk ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card text-foreground",
           )}
         >
           {walk ? `Walk · ${walkCount} captured` : "Walk Capture"}
@@ -271,7 +287,7 @@ function CapturePage() {
         <input ref={libRef} type="file" accept="image/*" multiple className="hidden"
           onChange={(e) => handleFiles(e.target.files)} />
 
-        {draft.photos.length > 0 && (
+        {draft.photos.length > 0 ? (
           <div className="mt-3 flex gap-2 overflow-x-auto">
             {draft.photos.map((p, i) => (
               <div key={i} className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg">
@@ -286,6 +302,13 @@ function CapturePage() {
               </div>
             ))}
           </div>
+        ) : (
+          (draft.type === "defect" || draft.type === "client") && (
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-3 w-3" />
+              At least one original photo is required for {draft.type === "client" ? "client defects" : "defects"}.
+            </p>
+          )
         )}
 
         <div className="mt-3 rounded-xl border border-dashed border-border bg-background/40 p-3">
@@ -296,7 +319,7 @@ function CapturePage() {
                 Voice note → auto-fill
               </div>
               <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                e.g. “Building 3, Unit 301, Laundry, tiling needs to be rectified, ASTW Tiling to action.”
+                e.g. "Building 3, Unit 301, Laundry, tiling needs to be rectified, ASTW Tiling to action."
               </p>
             </div>
             {!recording ? (
@@ -306,15 +329,7 @@ function CapturePage() {
                 disabled={processing}
                 className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:brightness-110 disabled:opacity-60"
               >
-                {processing ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Transcribing…
-                  </>
-                ) : (
-                  <>
-                    <Mic className="h-3.5 w-3.5" /> Record
-                  </>
-                )}
+                {processing ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> Transcribing…</>) : (<><Mic className="h-3.5 w-3.5" /> Record</>)}
               </button>
             ) : (
               <button
@@ -328,37 +343,51 @@ function CapturePage() {
           </div>
           {transcript && (
             <p className="mt-2 rounded-md bg-muted/50 p-2 text-[11px] italic text-muted-foreground">
-              “{transcript}”
+              "{transcript}"
             </p>
           )}
         </div>
       </div>
 
-      {/* Type toggle */}
-      <div className="mt-4 grid grid-cols-2 gap-2">
+      {/* Type toggle — three types */}
+      <div className="mt-4 grid grid-cols-3 gap-2">
         <TypeChip active={draft.type === "defect"} onClick={() => update("type", "defect")} label="Defect" />
-        <TypeChip active={draft.type === "incomplete"} onClick={() => update("type", "incomplete")} label="Incomplete Work" />
+        <TypeChip active={draft.type === "incomplete"} onClick={() => update("type", "incomplete")} label="Incomplete" />
+        <TypeChip active={draft.type === "client"} onClick={() => update("type", "client")} label="Client Defect" />
       </div>
+
+      {/* Client-specific */}
+      {draft.type === "client" && (
+        <Section title="Client defect source">
+          <Selectish
+            label="Raised by *"
+            value={draft.raisedBy}
+            onChange={(v) => update("raisedBy", v)}
+            options={[...RAISED_BY_OPTIONS]}
+            placeholder="Who raised this?"
+          />
+        </Section>
+      )}
 
       {/* Location */}
       <Section title="Location">
         <Selectish label="Project" value={draft.project} onChange={(v) => update("project", v)} options={settings.projects} />
         <div className="grid grid-cols-3 gap-2">
-          <Field label="Building"><Input value={draft.building} onChange={(e) => update("building", e.target.value)} /></Field>
-          <Field label="Level"><Input value={draft.level} onChange={(e) => update("level", e.target.value)} /></Field>
-          <Field label="Unit"><Input value={draft.unit} onChange={(e) => update("unit", e.target.value)} /></Field>
+          <Selectish label="Building *" value={draft.building} onChange={(v) => update("building", v)} options={cfg.buildings} placeholder="Building" allowFree />
+          <Selectish label="Level" value={draft.level} onChange={(v) => update("level", v)} options={cfg.levels} placeholder="Level" allowFree />
+          <Field label="Unit *"><Input value={draft.unit} onChange={(e) => update("unit", e.target.value)} placeholder="e.g. 304" /></Field>
         </div>
-        <Field label="Room / Location"><Input value={draft.room} onChange={(e) => update("room", e.target.value)} placeholder="e.g. Kitchen, Bathroom" /></Field>
+        <Selectish label="Room / Location" value={draft.room} onChange={(v) => update("room", v)} options={cfg.rooms} placeholder="Room" allowFree />
       </Section>
 
       {/* Assign */}
       <Section title="Assign">
         <div className="grid grid-cols-2 gap-2">
           <Selectish label="Trade" value={draft.trade} onChange={(v) => update("trade", v)} options={TRADES} placeholder="Select trade" />
-          <Selectish label="Subcontractor" value={draft.subcontractor} onChange={(v) => update("subcontractor", v)} options={settings.subcontractors} placeholder="Select sub" />
+          <Selectish label="Subcontractor" value={draft.subcontractor} onChange={(v) => update("subcontractor", v)} options={subOptions} placeholder="Select sub" />
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["high","urgent"]} />
+          <Selectish label="Priority" value={draft.priority} onChange={(v) => update("priority", v as Priority)} options={["high", "urgent"]} />
           <Field label="Due date"><Input type="date" value={draft.dueDate} onChange={(e) => update("dueDate", e.target.value)} /></Field>
         </div>
       </Section>
@@ -368,7 +397,7 @@ function CapturePage() {
         <Textarea
           value={draft.description}
           onChange={(e) => update("description", e.target.value)}
-          placeholder="Short, specific. e.g. ‘Cracked tile under vanity, replace and regrout.’"
+          placeholder="Short, specific. e.g. 'Cracked tile under vanity, replace and regrout.'"
           rows={4}
         />
       </Section>
@@ -422,44 +451,57 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function Selectish({ label, value, onChange, options, placeholder }: {
-  label: string; value: string; onChange: (v: string) => void; options: readonly string[]; placeholder?: string;
+function Selectish({ label, value, onChange, options, placeholder, allowFree }: {
+  label: string; value: string; onChange: (v: string) => void; options: readonly string[]; placeholder?: string; allowFree?: boolean;
 }) {
+  const showCustom = allowFree && value && !options.includes(value);
   return (
     <Field label={label}>
       <div className="relative">
         <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={showCustom ? "__custom__" : value}
+          onChange={(e) => {
+            if (e.target.value === "__custom__") return;
+            onChange(e.target.value);
+          }}
           className="h-10 w-full appearance-none rounded-md border border-input bg-background px-3 pr-8 text-sm"
         >
           {!value && <option value="">{placeholder ?? "Select…"}</option>}
-          {options.map((o) => (
-            <option key={o} value={o}>{o}</option>
-          ))}
+          {options.map((o) => (<option key={o} value={o}>{o}</option>))}
+          {allowFree && <option value="__custom__">+ Custom…</option>}
+          {showCustom && <option value={value}>{value}</option>}
         </select>
         <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
       </div>
+      {allowFree && (
+        <Input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={`or type ${label.toLowerCase().replace(" *", "")}`}
+          className="mt-1 h-8 text-xs"
+        />
+      )}
     </Field>
   );
 }
 
-function issueItem(id: string, d: Draft) {
-  const subject = `[CleanRun IQ] ${d.type === "defect" ? "Defect" : "Incomplete work"} — ${d.building} ${d.unit} ${d.room}`;
+function issueByMail(id: string, d: Draft) {
+  const subject = `[CleanRun IQ] ${d.type === "defect" ? "Defect" : d.type === "client" ? "Client Defect" : "Incomplete Work"} — ${d.building} ${d.unit} ${d.room}`;
   const body = [
     `Project: ${d.project}`,
     `Location: ${d.building} / ${d.level} / ${d.unit} / ${d.room}`,
     `Trade: ${d.trade}`,
     `Priority: ${d.priority}`,
     `Due: ${d.dueDate}`,
+    d.raisedBy ? `Raised by: ${d.raisedBy}` : "",
     "",
     d.description,
     "",
     `View item: ${typeof window !== "undefined" ? window.location.origin : ""}/items/${id}`,
     "",
     "— Issued via CleanRun IQ",
-  ].join("\n");
-  itemsStore.setStatus(id, "issued", `Issued to ${d.subcontractor || "subcontractor"}`);
+  ].filter(Boolean).join("\n");
+  itemsStore.issue(id, { to: d.subcontractor || "subcontractor" });
   if (typeof window !== "undefined") {
     window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   }
