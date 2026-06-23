@@ -10,15 +10,69 @@ export type ItemStatus =
   | "closed"
   | "complete";
 
-/**
- * Priority is intentionally simple: High = standard, Urgent = critical / escalated.
- * Items in progress longer than ESCALATION_DAYS are treated as escalated in
- * reports (see isEscalated()), without mutating the underlying priority.
- */
 export type Priority = "high" | "urgent";
 
 export const ESCALATION_DAYS = 10;
 
+export const RAISED_BY_OPTIONS = [
+  "Client PM",
+  "Superintendent",
+  "Consultant",
+  "Architect",
+  "Buyer",
+  "Other",
+] as const;
+
+/** Subcontractor-supplied evidence of rectification. */
+export interface RectificationEvidence {
+  id: string;
+  photo?: string;
+  comment?: string;
+  by: string;
+  at: string;
+}
+
+/** Site-team closeout evidence. Multiple entries supported. */
+export interface CloseoutEvidence {
+  id: string;
+  photo?: string;
+  by: string;
+  role: string;
+  note?: string;
+  confirmation?: string;
+  at: string;
+}
+
+export interface Comment {
+  id: string;
+  text: string;
+  by: string;
+  at: string;
+}
+
+export interface IssueEvent {
+  at: string;
+  by?: string;
+  to: string;
+  note?: string;
+  reissue?: boolean;
+}
+
+export interface InspectionEvent {
+  at: string;
+  by: string;
+  action: "started" | "accepted" | "rejected";
+  reason?: string;
+}
+
+export interface AuditEvent {
+  at: string;
+  action: string;
+  by?: string;
+  note?: string;
+}
+
+/** Legacy single-closeout shape, kept for migration + report fallback. */
 export interface Closeout {
   photo?: string;
   signedBy: string;
@@ -27,17 +81,11 @@ export interface Closeout {
   signedAt: string;
 }
 
-export interface HistoryEntry {
-  at: string;
-  action: string;
-  by?: string;
-  note?: string;
-}
+/** Legacy alias kept for any code still reading item.history. */
+export type HistoryEntry = AuditEvent;
 
 export interface Item {
-  /** Stable internal id (uuid). */
   id: string;
-  /** Human-facing reference, e.g. DEF-001, INC-004, CLD-002. */
   code: string;
   type: ItemType;
   project: string;
@@ -48,18 +96,61 @@ export interface Item {
   trade: string;
   subcontractor: string;
   priority: Priority;
-  dueDate: string; // ISO yyyy-mm-dd
+  dueDate: string;
   description: string;
-  photos: string[];
   status: ItemStatus;
   createdAt: string;
   updatedAt: string;
-  /** When item was issued to the subcontractor (drives escalation clock). */
+  createdBy?: string;
+
+  /** Photos taken by the site team when first raising the item. */
+  originalPhotos: string[];
+  /** Photos/notes uploaded by the subcontractor as evidence of rectification. */
+  rectificationEvidence: RectificationEvidence[];
+  /** Photos & sign-off entered by site team when closing. */
+  closeoutEvidence: CloseoutEvidence[];
+  comments: Comment[];
+  issueHistory: IssueEvent[];
+  inspectionHistory: InspectionEvent[];
+  auditEvents: AuditEvent[];
+
+  /** Client Defects: who raised the issue. */
+  raisedBy?: string;
+
   issuedAt?: string;
-  /** When subcontractor acknowledged & moved to in-progress. */
   inProgressAt?: string;
+  readyForReviewAt?: string;
+  underInspectionAt?: string;
+  closedAt?: string;
+  rejectionReason?: string;
+
+  /** @deprecated kept in sync with originalPhotos for any older readers. */
+  photos: string[];
+  /** @deprecated kept in sync with closeoutEvidence[0] for legacy readers. */
   closeout?: Closeout;
-  history: HistoryEntry[];
+  /** @deprecated kept in sync with auditEvents. */
+  history: AuditEvent[];
+}
+
+/** Per-subcontractor profile stored under Settings. */
+export interface SubProfile {
+  name: string;
+  trade?: string;
+  contact?: string;
+  email?: string;
+  phone?: string;
+  projects?: string[];
+}
+
+/** Per-project setup defaults. */
+export interface ProjectConfig {
+  name: string;
+  address?: string;
+  buildings: string[];
+  levels: string[];
+  units: string[];
+  rooms: string[];
+  defaultDueDays: number;
 }
 
 export const TRADES = [
@@ -108,7 +199,6 @@ export const CODE_PREFIX: Record<ItemType, string> = {
   client: "CLD",
 };
 
-/** Generate the next sequential code for a given type, e.g. DEF-001. */
 export function nextCode(items: Item[], type: ItemType): string {
   const prefix = CODE_PREFIX[type];
   const max = items
@@ -119,7 +209,6 @@ export function nextCode(items: Item[], type: ItemType): string {
   return `${prefix}-${String(max + 1).padStart(3, "0")}`;
 }
 
-/** Days an item has been with the subcontractor (in_progress). 0 if not started. */
 export function daysInProgress(item: Item): number {
   if (!item.inProgressAt) return 0;
   if (item.status === "closed" || item.status === "complete") return 0;
@@ -127,15 +216,10 @@ export function daysInProgress(item: Item): number {
   return Math.floor(ms / 86400000);
 }
 
-/**
- * An item is considered escalated when it has been in progress longer than
- * ESCALATION_DAYS. This is presentational only — it does not mutate priority.
- */
 export function isEscalated(item: Item): boolean {
   return item.status === "in_progress" && daysInProgress(item) > ESCALATION_DAYS;
 }
 
-/** Recommended next-action label for each status. */
 export function nextActionLabel(status: ItemStatus): string {
   switch (status) {
     case "open": return "Issue to subcontractor";
@@ -147,4 +231,8 @@ export function nextActionLabel(status: ItemStatus): string {
     case "closed":
     case "complete": return "Closed";
   }
+}
+
+export function makeId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

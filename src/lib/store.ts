@@ -1,148 +1,212 @@
-// TODO[production]: replace localStorage with proper database + object storage for photos.
-// TODO[production]: enforce roles server-side. Current role gating is UI-only.
 import { useSyncExternalStore } from "react";
-import type { Item, ItemStatus, HistoryEntry, Closeout, ItemType, Priority } from "./types";
-import { CODE_PREFIX, nextCode } from "./types";
+import type { AuditEvent, Closeout, CloseoutEvidence, Comment, InspectionEvent, IssueEvent, Item, ItemStatus, ItemType, Priority, ProjectConfig, RectificationEvidence, SubProfile } from "./types";
+import { CODE_PREFIX, makeId, nextCode } from "./types";
+import { buildDemoSeedItems } from "./demo-seed";
 
-const KEY = "cleanrun-iq:items:v4";
-const LEGACY_ITEM_KEYS = ["cleanrun-iq:items:v3"];
-const SETTINGS_KEY = "cleanrun-iq:settings:v4";
-const LEGACY_SETTINGS_KEYS = ["cleanrun-iq:settings:v3"];
+const KEY = "cleanrun-iq:items:v5";
+const LEGACY_ITEM_KEYS = ["cleanrun-iq:items:v4", "cleanrun-iq:items:v3"];
+const SETTINGS_KEY = "cleanrun-iq:settings:v5";
+const LEGACY_SETTINGS_KEYS = ["cleanrun-iq:settings:v4", "cleanrun-iq:settings:v3"];
+const isBrowser = typeof window !== "undefined";
 
 export interface Settings {
   projects: string[];
+  projectConfigs: Record<string, ProjectConfig>;
   subcontractors: string[];
+  subProfiles: Record<string, SubProfile>;
   activeProject: string;
   company?: string;
+  preparedBy?: string;
 }
+
+const DEFAULT_PROJECT_CONFIG = (name: string): ProjectConfig => ({
+  name,
+  address: "",
+  buildings: ["Block A", "Block B"],
+  levels: ["L01", "L02", "L03"],
+  units: [],
+  rooms: ["Kitchen", "Living", "Bathroom", "Ensuite", "Bedroom 1", "Bedroom 2", "Laundry", "Balcony", "Hallway", "Garage"],
+  defaultDueDays: 7,
+});
+
+const DEFAULT_SUBS = [
+  "Coastline Painting",
+  "Apex Plastering",
+  "Sterling Tiling",
+  "AquaSeal Waterproofing",
+  "TrueLine Joinery",
+  "Northline Electrical",
+  "Pacific Plumbing",
+  "Skyline Glazing",
+  "Premier Flooring",
+  "Endeavour Cleaning",
+];
+
+const DEFAULT_SUB_PROFILES: Record<string, SubProfile> = Object.fromEntries(DEFAULT_SUBS.map((name) => [name, { name, trade: tradeGuess(name), contact: "Demo Contact", email: `${name.toLowerCase().replace(/[^a-z]+/g, "")}@example.com`, phone: "" } satisfies SubProfile]));
 
 const DEFAULT_SETTINGS: Settings = {
   projects: ["Jura Noosa", "Meta Street"],
-  subcontractors: [
-    "Coastline Painting",
-    "Apex Plastering",
-    "Sterling Tiling",
-    "AquaSeal Waterproofing",
-    "TrueLine Joinery",
-    "Northline Electrical",
-    "Pacific Plumbing",
-    "Skyline Glazing",
-    "Premier Flooring",
-    "Endeavour Cleaning",
-  ],
+  projectConfigs: {
+    "Jura Noosa": { ...DEFAULT_PROJECT_CONFIG("Jura Noosa"), address: "Demo project · Noosa", buildings: ["Block A", "Block B"], levels: ["L01", "L02", "L03"], units: ["A-304", "A-305", "B-112", "B-204"] },
+    "Meta Street": { ...DEFAULT_PROJECT_CONFIG("Meta Street"), address: "Demo project · Mooloolaba", buildings: ["Tower 1"], levels: ["L01", "L02", "L05", "L08", "L10"], units: ["T1-502", "T1-803", "T1-1004"] },
+  },
+  subcontractors: DEFAULT_SUBS,
+  subProfiles: DEFAULT_SUB_PROFILES,
   activeProject: "Jura Noosa",
-  company: "CleanRun Construction",
+  company: "CleanRun Construction Demo",
+  preparedBy: "Site Manager",
 };
 
 const VALID_TYPES: ItemType[] = ["defect", "incomplete", "client"];
-const VALID_STATUSES: ItemStatus[] = [
-  "open",
-  "issued",
-  "in_progress",
-  "ready_for_review",
-  "under_inspection",
-  "rejected",
-  "closed",
-  "complete",
-];
+const VALID_STATUSES: ItemStatus[] = ["open", "issued", "in_progress", "ready_for_review", "under_inspection", "rejected", "closed", "complete"];
 
-const isBrowser = typeof window !== "undefined";
+function tradeGuess(name: string): string | undefined {
+  const m = name.toLowerCase();
+  if (m.includes("paint")) return "Painting";
+  if (m.includes("plaster")) return "Plastering";
+  if (m.includes("til")) return "Tiling";
+  if (m.includes("water") || m.includes("seal")) return "Waterproofing";
+  if (m.includes("joinery")) return "Joinery";
+  if (m.includes("electric")) return "Electrical";
+  if (m.includes("plumb") || m.includes("hydra")) return "Hydraulic";
+  if (m.includes("glaz") || m.includes("window")) return "Windows / Aluminium";
+  if (m.includes("floor")) return "Flooring";
+  if (m.includes("clean")) return "Cleaning";
+  return undefined;
+}
 
 function uniqueStrings(input: unknown, fallback: string[]): string[] {
   if (!Array.isArray(input)) return fallback;
-  const cleaned = input
-    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-    .map((v) => v.trim());
+  const cleaned = input.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
   return cleaned.length ? Array.from(new Set(cleaned)) : fallback;
 }
 
-/** Merge and validate persisted settings so stale localStorage cannot blank the app. */
 function normaliseSettings(input: unknown): Settings {
   const obj = input && typeof input === "object" ? (input as Partial<Settings>) : {};
   const projects = uniqueStrings(obj.projects, DEFAULT_SETTINGS.projects);
-  const subcontractors = uniqueStrings(obj.subcontractors, DEFAULT_SETTINGS.subcontractors).sort((a, b) =>
-    a.localeCompare(b),
-  );
-  const activeProject =
-    typeof obj.activeProject === "string" && projects.includes(obj.activeProject)
-      ? obj.activeProject
-      : projects[0] ?? DEFAULT_SETTINGS.activeProject;
+  const subcontractors = uniqueStrings(obj.subcontractors, DEFAULT_SETTINGS.subcontractors).sort((a, b) => a.localeCompare(b));
+  const projectConfigs: Record<string, ProjectConfig> = {};
+
+  for (const project of projects) {
+    const existing = (obj.projectConfigs as Record<string, ProjectConfig> | undefined)?.[project];
+    const fallback = DEFAULT_SETTINGS.projectConfigs[project] ?? DEFAULT_PROJECT_CONFIG(project);
+    projectConfigs[project] = {
+      name: project,
+      address: existing?.address ?? fallback.address ?? "",
+      buildings: uniqueStrings(existing?.buildings, fallback.buildings),
+      levels: uniqueStrings(existing?.levels, fallback.levels),
+      units: uniqueStrings(existing?.units, fallback.units),
+      rooms: uniqueStrings(existing?.rooms, fallback.rooms),
+      defaultDueDays: typeof existing?.defaultDueDays === "number" ? existing.defaultDueDays : fallback.defaultDueDays,
+    };
+  }
+
+  const subProfiles: Record<string, SubProfile> = {};
+  for (const name of subcontractors) {
+    const existing = (obj.subProfiles as Record<string, SubProfile> | undefined)?.[name];
+    const fallback = DEFAULT_SUB_PROFILES[name];
+    subProfiles[name] = {
+      name,
+      trade: existing?.trade ?? fallback?.trade,
+      contact: existing?.contact ?? fallback?.contact ?? "",
+      email: existing?.email ?? fallback?.email ?? "",
+      phone: existing?.phone ?? fallback?.phone ?? "",
+      projects: existing?.projects ?? fallback?.projects,
+    };
+  }
+
+  const activeProject = typeof obj.activeProject === "string" && projects.includes(obj.activeProject) ? obj.activeProject : projects[0] ?? DEFAULT_SETTINGS.activeProject;
   const company = typeof obj.company === "string" && obj.company.trim() ? obj.company.trim() : DEFAULT_SETTINGS.company;
-
-  return { projects, subcontractors, activeProject, company };
+  const preparedBy = typeof obj.preparedBy === "string" && obj.preparedBy.trim() ? obj.preparedBy.trim() : DEFAULT_SETTINGS.preparedBy;
+  return { projects, projectConfigs, subcontractors, subProfiles, activeProject, company, preparedBy };
 }
 
-/** Coerce any legacy priority value to the new high/urgent system. */
-function normalisePriority(p: unknown): Priority {
-  if (p === "urgent") return "urgent";
-  return "high";
+function normalisePriority(p: unknown): Priority { return p === "urgent" ? "urgent" : "high"; }
+function normaliseStatus(s: unknown): ItemStatus { return VALID_STATUSES.includes(s as ItemStatus) ? (s as ItemStatus) : "open"; }
+function normaliseType(t: unknown): ItemType { return VALID_TYPES.includes(t as ItemType) ? (t as ItemType) : "defect"; }
+function addDays(days: number) { const date = new Date(); date.setDate(date.getDate() + days); return date.toISOString().slice(0, 10); }
+
+function normaliseCloseoutEvidence(input: unknown): CloseoutEvidence[] {
+  if (!Array.isArray(input)) return [];
+  return input.filter((e): e is Partial<CloseoutEvidence> => !!e && typeof e === "object").map((e) => ({
+    id: typeof e.id === "string" && e.id ? e.id : makeId(),
+    photo: typeof e.photo === "string" && e.photo ? e.photo : undefined,
+    by: typeof e.by === "string" && e.by ? e.by : "Site Manager",
+    role: typeof e.role === "string" && e.role ? e.role : "Site Manager",
+    note: typeof e.note === "string" && e.note ? e.note : undefined,
+    confirmation: typeof e.confirmation === "string" && e.confirmation ? e.confirmation : undefined,
+    at: typeof e.at === "string" && e.at ? e.at : new Date().toISOString(),
+  }));
 }
 
-function normaliseStatus(s: unknown): ItemStatus {
-  return VALID_STATUSES.includes(s as ItemStatus) ? (s as ItemStatus) : "open";
+function closeoutMirror(evidence: CloseoutEvidence[]): Closeout | undefined {
+  const first = evidence[0];
+  if (!first) return undefined;
+  return { photo: first.photo, signedBy: first.by, role: first.role, note: first.note, signedAt: first.at };
 }
 
-function normaliseType(t: unknown): ItemType {
-  return VALID_TYPES.includes(t as ItemType) ? (t as ItemType) : "defect";
+function migrateItem(raw: unknown, idx: number): Item {
+  const i = raw && typeof raw === "object" ? (raw as Partial<Item> & { photos?: unknown; closeout?: unknown; history?: unknown }) : {};
+  const type = normaliseType(i.type);
+  const now = new Date().toISOString();
+  const originalPhotos = Array.isArray(i.originalPhotos) ? i.originalPhotos.filter((p): p is string => typeof p === "string" && !!p) : Array.isArray(i.photos) ? (i.photos as unknown[]).filter((p): p is string => typeof p === "string" && !!p) : [];
+  const rectificationEvidence: RectificationEvidence[] = Array.isArray(i.rectificationEvidence) ? (i.rectificationEvidence as RectificationEvidence[]) : [];
+  let closeoutEvidence = normaliseCloseoutEvidence(i.closeoutEvidence);
+  const legacyCloseout = i.closeout as Closeout | undefined;
+  if (closeoutEvidence.length === 0 && legacyCloseout) closeoutEvidence = [{ id: makeId(), photo: legacyCloseout.photo || undefined, by: legacyCloseout.signedBy || "Site Manager", role: legacyCloseout.role || "Site Manager", note: legacyCloseout.note, at: legacyCloseout.signedAt || now }];
+  const auditEvents: AuditEvent[] = Array.isArray(i.auditEvents) ? (i.auditEvents as AuditEvent[]) : Array.isArray(i.history) ? (i.history as AuditEvent[]) : [{ at: now, action: "Created" }];
+
+  const item: Item = {
+    id: typeof i.id === "string" && i.id ? i.id : `item-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+    code: typeof i.code === "string" ? i.code : "",
+    type,
+    project: typeof i.project === "string" && i.project ? i.project : DEFAULT_SETTINGS.activeProject,
+    building: typeof i.building === "string" ? i.building : "",
+    level: typeof i.level === "string" ? i.level : "",
+    unit: typeof i.unit === "string" ? i.unit : "",
+    room: typeof i.room === "string" ? i.room : "",
+    trade: typeof i.trade === "string" ? i.trade : "",
+    subcontractor: typeof i.subcontractor === "string" ? i.subcontractor : "",
+    priority: normalisePriority(i.priority),
+    dueDate: typeof i.dueDate === "string" && i.dueDate ? i.dueDate : addDays(7),
+    description: typeof i.description === "string" ? i.description : "",
+    status: normaliseStatus(i.status),
+    createdAt: typeof i.createdAt === "string" ? i.createdAt : now,
+    updatedAt: typeof i.updatedAt === "string" ? i.updatedAt : now,
+    createdBy: typeof i.createdBy === "string" ? i.createdBy : undefined,
+    originalPhotos,
+    rectificationEvidence,
+    closeoutEvidence,
+    comments: Array.isArray(i.comments) ? (i.comments as Comment[]) : [],
+    issueHistory: Array.isArray(i.issueHistory) ? (i.issueHistory as IssueEvent[]) : [],
+    inspectionHistory: Array.isArray(i.inspectionHistory) ? (i.inspectionHistory as InspectionEvent[]) : [],
+    auditEvents,
+    raisedBy: typeof i.raisedBy === "string" ? i.raisedBy : undefined,
+    issuedAt: typeof i.issuedAt === "string" ? i.issuedAt : undefined,
+    inProgressAt: typeof i.inProgressAt === "string" ? i.inProgressAt : undefined,
+    readyForReviewAt: typeof i.readyForReviewAt === "string" ? i.readyForReviewAt : undefined,
+    underInspectionAt: typeof i.underInspectionAt === "string" ? i.underInspectionAt : undefined,
+    closedAt: typeof i.closedAt === "string" ? i.closedAt : undefined,
+    rejectionReason: typeof i.rejectionReason === "string" ? i.rejectionReason : undefined,
+    photos: originalPhotos,
+    closeout: closeoutMirror(closeoutEvidence),
+    history: auditEvents,
+  };
+  return item;
 }
 
-/** Ensure every loaded item has the required current shape. */
 function migrate(items: unknown): Item[] {
   if (!Array.isArray(items)) return seedItems();
-
-  const coerced = items.map((raw, idx) => {
-    const i = raw && typeof raw === "object" ? (raw as Partial<Item>) : {};
-    const type = normaliseType(i.type);
-    const status = normaliseStatus(i.status);
-    const now = new Date().toISOString();
-
-    return {
-      id: typeof i.id === "string" && i.id ? i.id : `item-${idx}-${Math.random().toString(36).slice(2, 8)}`,
-      code: typeof i.code === "string" ? i.code : "",
-      type,
-      project: typeof i.project === "string" && i.project ? i.project : DEFAULT_SETTINGS.activeProject,
-      building: typeof i.building === "string" ? i.building : "",
-      level: typeof i.level === "string" ? i.level : "",
-      unit: typeof i.unit === "string" ? i.unit : "",
-      room: typeof i.room === "string" ? i.room : "",
-      trade: typeof i.trade === "string" ? i.trade : "",
-      subcontractor: typeof i.subcontractor === "string" ? i.subcontractor : "",
-      priority: normalisePriority(i.priority),
-      dueDate: typeof i.dueDate === "string" && i.dueDate ? i.dueDate : addDays(7),
-      description: typeof i.description === "string" ? i.description : "",
-      photos: Array.isArray(i.photos) ? i.photos.filter((p): p is string => typeof p === "string") : [],
-      status,
-      createdAt: typeof i.createdAt === "string" ? i.createdAt : now,
-      updatedAt: typeof i.updatedAt === "string" ? i.updatedAt : now,
-      issuedAt: typeof i.issuedAt === "string" ? i.issuedAt : undefined,
-      inProgressAt: typeof i.inProgressAt === "string" ? i.inProgressAt : undefined,
-      closeout: i.closeout,
-      history: Array.isArray(i.history) ? (i.history as HistoryEntry[]) : [{ at: now, action: "Created" }],
-    } satisfies Item;
-  });
-
+  const coerced = items.map(migrateItem);
   const counters: Record<ItemType, number> = { defect: 0, incomplete: 0, client: 0 };
-
-  coerced.forEach((i) => {
-    const prefix = CODE_PREFIX[i.type];
-    if (i.code?.startsWith(`${prefix}-`)) {
-      const n = parseInt(i.code.slice(prefix.length + 1), 10);
-      if (Number.isFinite(n) && n > counters[i.type]) counters[i.type] = n;
-    }
-  });
-
-  return coerced.map((i) => {
-    if (i.code) return i;
-    counters[i.type] += 1;
-    return { ...i, code: `${CODE_PREFIX[i.type]}-${String(counters[i.type]).padStart(3, "0")}` };
-  });
+  coerced.forEach((i) => { const prefix = CODE_PREFIX[i.type]; if (i.code?.startsWith(`${prefix}-`)) { const n = parseInt(i.code.slice(prefix.length + 1), 10); if (Number.isFinite(n) && n > counters[i.type]) counters[i.type] = n; } });
+  return coerced.map((i) => { if (i.code) return i; counters[i.type] += 1; return { ...i, code: `${CODE_PREFIX[i.type]}-${String(counters[i.type]).padStart(3, "0")}` }; });
 }
 
 function readJsonFromStorage(key: string): unknown | undefined {
   if (!isBrowser) return undefined;
   const raw = localStorage.getItem(key);
-  if (!raw) return undefined;
-  return JSON.parse(raw) as unknown;
+  return raw ? JSON.parse(raw) as unknown : undefined;
 }
 
 function loadItems(): Item[] {
@@ -150,16 +214,10 @@ function loadItems(): Item[] {
   try {
     const current = readJsonFromStorage(KEY);
     if (current !== undefined) return migrate(current);
-
     for (const legacyKey of LEGACY_ITEM_KEYS) {
       const legacy = readJsonFromStorage(legacyKey);
-      if (legacy !== undefined) {
-        const migrated = migrate(legacy);
-        localStorage.setItem(KEY, JSON.stringify(migrated));
-        return migrated;
-      }
+      if (legacy !== undefined) { const migrated = migrate(legacy); localStorage.setItem(KEY, JSON.stringify(migrated)); return migrated; }
     }
-
     return seedItems();
   } catch (error) {
     console.warn("CleanRun IQ recovered from invalid stored items", error);
@@ -171,21 +229,11 @@ function loadSettings(): Settings {
   if (!isBrowser) return DEFAULT_SETTINGS;
   try {
     const current = readJsonFromStorage(SETTINGS_KEY);
-    if (current !== undefined) {
-      const settings = normaliseSettings(current);
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-      return settings;
-    }
-
+    if (current !== undefined) { const settings = normaliseSettings(current); localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); return settings; }
     for (const legacyKey of LEGACY_SETTINGS_KEYS) {
       const legacy = readJsonFromStorage(legacyKey);
-      if (legacy !== undefined) {
-        const settings = normaliseSettings(legacy);
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-        return settings;
-      }
+      if (legacy !== undefined) { const settings = normaliseSettings(legacy); localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); return settings; }
     }
-
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
     return DEFAULT_SETTINGS;
   } catch (error) {
@@ -195,290 +243,65 @@ function loadSettings(): Settings {
   }
 }
 
-function addDays(d: number) {
-  const date = new Date();
-  date.setDate(date.getDate() + d);
-  return date.toISOString().slice(0, 10);
-}
-
-function placeholderPhoto(label: string, hue: number): string {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'>
-    <defs><linearGradient id='g' x1='0' x2='1' y1='0' y2='1'>
-      <stop offset='0' stop-color='hsl(${hue},35%,82%)'/>
-      <stop offset='1' stop-color='hsl(${hue},30%,62%)'/>
-    </linearGradient></defs>
-    <rect width='200' height='200' fill='url(#g)'/>
-    <g fill='hsl(${hue},40%,30%)' opacity='0.85' font-family='Inter,system-ui,sans-serif' font-weight='600'>
-      <text x='100' y='108' text-anchor='middle' font-size='22'>${label}</text>
-    </g>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-interface SeedSpec {
-  type: ItemType;
-  project: string;
-  building: string;
-  level: string;
-  unit: string;
-  room: string;
-  trade: string;
-  subcontractor: string;
-  priority: Priority;
-  due: number;
-  description: string;
-  status: ItemStatus;
-  closeout?: Closeout;
-  hue: number;
-  label: string;
-  daysAgoIssued?: number;
-  daysAgoInProgress?: number;
-}
-
 function seedItems(): Item[] {
-  const now = new Date().toISOString();
-  const specs: SeedSpec[] = [
-    {
-      type: "defect", project: "Jura Noosa", building: "Block A", level: "L03", unit: "A-304", room: "Ensuite",
-      trade: "Tiling", subcontractor: "Sterling Tiling", priority: "urgent", due: -2,
-      description: "Cracked floor tile under vanity. Replace and re-grout.",
-      status: "issued", hue: 12, label: "Tile", daysAgoIssued: 2,
-    },
-    {
-      type: "defect", project: "Jura Noosa", building: "Block A", level: "L03", unit: "A-304", room: "Living",
-      trade: "Painting", subcontractor: "Coastline Painting", priority: "high", due: 1,
-      description: "Paint chipping along south wall skirting. Sand, patch and re-coat.",
-      status: "in_progress", hue: 200, label: "Paint", daysAgoIssued: 5, daysAgoInProgress: 3,
-    },
-    {
-      type: "incomplete", project: "Jura Noosa", building: "Block A", level: "L03", unit: "A-305", room: "Kitchen",
-      trade: "Joinery", subcontractor: "TrueLine Joinery", priority: "high", due: 4,
-      description: "Pantry door not yet installed. Hardware on site.",
-      status: "open", hue: 35, label: "Joinery",
-    },
-    {
-      type: "defect", project: "Jura Noosa", building: "Block B", level: "L01", unit: "B-112", room: "Bathroom",
-      trade: "Waterproofing", subcontractor: "AquaSeal Waterproofing", priority: "high", due: 0,
-      description: "Visible moisture at shower hob junction. Inspect membrane.",
-      status: "ready_for_review", hue: 220, label: "Waterproof", daysAgoIssued: 7, daysAgoInProgress: 5,
-    },
-    {
-      type: "client", project: "Jura Noosa", building: "Block B", level: "L02", unit: "B-204", room: "Bedroom 2",
-      trade: "Doors / Hardware", subcontractor: "TrueLine Joinery", priority: "high", due: 6,
-      description: "Client raised: bedroom door rubs on jamb. Adjust and re-hang.",
-      status: "issued", hue: 280, label: "Door", daysAgoIssued: 1,
-    },
-    {
-      type: "defect", project: "Meta Street", building: "Tower 1", level: "L08", unit: "T1-803", room: "Kitchen",
-      trade: "Electrical", subcontractor: "Northline Electrical", priority: "urgent", due: -1,
-      description: "Powerpoint above benchtop not energised. Test circuit.",
-      status: "in_progress", hue: 50, label: "Power", daysAgoIssued: 14, daysAgoInProgress: 12,
-    },
-    {
-      type: "incomplete", project: "Meta Street", building: "Tower 1", level: "L08", unit: "T1-803", room: "Balcony",
-      trade: "Caulking / Sealant", subcontractor: "AquaSeal Waterproofing", priority: "high", due: 8,
-      description: "Perimeter sealant to balcony slider outstanding.",
-      status: "open", hue: 160, label: "Seal",
-    },
-    {
-      type: "defect", project: "Meta Street", building: "Tower 1", level: "L05", unit: "T1-502", room: "Hallway",
-      trade: "Plastering", subcontractor: "Apex Plastering", priority: "high", due: 3,
-      description: "Cornice gap at junction. Re-set and sand.",
-      status: "ready_for_review", hue: 110, label: "Plaster", daysAgoIssued: 4, daysAgoInProgress: 2,
-    },
-    {
-      type: "defect", project: "Meta Street", building: "Tower 1", level: "L02", unit: "T1-201", room: "Living",
-      trade: "Flooring", subcontractor: "Premier Flooring", priority: "high", due: -5,
-      description: "Lifted vinyl plank near entry. Re-adhere or replace.",
-      status: "closed", hue: 25, label: "Floor",
-      closeout: {
-        signedBy: "Sam Whitlock", role: "Site Manager",
-        signedAt: new Date(Date.now() - 86400000).toISOString(),
-        note: "Plank replaced, area re-cleaned. Approved.",
-      },
-    },
-    {
-      type: "client", project: "Meta Street", building: "Tower 1", level: "L10", unit: "T1-1004", room: "Ensuite",
-      trade: "Cleaning", subcontractor: "Endeavour Cleaning", priority: "high", due: 2,
-      description: "Client raised: grout haze on shower wall tiles. Re-clean.",
-      status: "open", hue: 190, label: "Clean",
-    },
-  ];
-
-  const counters: Record<ItemType, number> = { defect: 0, incomplete: 0, client: 0 };
-
-  const seed: Item[] = specs.map((s, idx) => {
-    counters[s.type] += 1;
-    const code = `${CODE_PREFIX[s.type]}-${String(counters[s.type]).padStart(3, "0")}`;
-    const photos = [placeholderPhoto(s.label, s.hue)];
-    const history: HistoryEntry[] = [{ at: now, action: "Created" }];
-    const issuedAt = s.daysAgoIssued != null
-      ? new Date(Date.now() - s.daysAgoIssued * 86400000).toISOString()
-      : undefined;
-    const inProgressAt = s.daysAgoInProgress != null
-      ? new Date(Date.now() - s.daysAgoInProgress * 86400000).toISOString()
-      : undefined;
-    if (["issued", "in_progress", "ready_for_review", "under_inspection", "closed"].includes(s.status)) {
-      history.push({ at: issuedAt ?? now, action: `Issued to ${s.subcontractor}` });
-    }
-    if (["in_progress", "ready_for_review", "under_inspection", "closed"].includes(s.status)) {
-      history.push({ at: inProgressAt ?? now, action: "Subcontractor marked in progress" });
-    }
-    if (["ready_for_review", "under_inspection", "closed"].includes(s.status)) {
-      history.push({ at: now, action: "Marked ready for review" });
-    }
-    if (s.status === "closed" && s.closeout) {
-      history.push({ at: s.closeout.signedAt, action: "Closed with evidence", by: s.closeout.signedBy });
-    }
-    return {
-      id: `seed-${idx}-${Math.random().toString(36).slice(2, 8)}`,
-      code,
-      type: s.type, project: s.project, building: s.building, level: s.level,
-      unit: s.unit, room: s.room, trade: s.trade, subcontractor: s.subcontractor,
-      priority: s.priority, dueDate: addDays(s.due), description: s.description,
-      photos, status: s.status, createdAt: now, updatedAt: now, history,
-      closeout: s.closeout, issuedAt, inProgressAt,
-    };
-  });
-
+  const seed = buildDemoSeedItems().map(syncLegacyMirrors);
   if (isBrowser) localStorage.setItem(KEY, JSON.stringify(seed));
   return seed;
 }
 
 const listeners = new Set<() => void>();
-
 let itemsCache: Item[] | null = null;
 let settingsCache: Settings | null = null;
 
-function getItemsSnapshot(): Item[] {
-  if (itemsCache === null) itemsCache = loadItems();
-  return itemsCache;
-}
+function getItemsSnapshot(): Item[] { if (itemsCache === null) itemsCache = loadItems(); return itemsCache; }
+function getSettingsSnapshot(): Settings { if (settingsCache === null) settingsCache = loadSettings(); return settingsCache; }
 
-function getSettingsSnapshot(): Settings {
-  if (settingsCache === null) settingsCache = loadSettings();
-  return settingsCache;
-}
-
-function emit() {
-  itemsCache = null;
-  settingsCache = null;
-  listeners.forEach((l) => l());
-}
-
-function saveItems(items: Item[]) {
-  if (isBrowser) localStorage.setItem(KEY, JSON.stringify(items));
-  itemsCache = items;
-  settingsCache = null;
-  listeners.forEach((l) => l());
-}
-
-function saveSettings(s: Settings) {
-  const settings = normaliseSettings(s);
-  if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  settingsCache = settings;
-  listeners.forEach((l) => l());
-}
-
-void emit;
-
-function makeId() {
-  return globalThis.crypto?.randomUUID?.() ?? `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+function syncLegacyMirrors(item: Item): Item { return { ...item, photos: item.originalPhotos, closeout: closeoutMirror(item.closeoutEvidence), history: item.auditEvents }; }
+function saveItems(items: Item[]) { const synced = items.map(syncLegacyMirrors); if (isBrowser) localStorage.setItem(KEY, JSON.stringify(synced)); itemsCache = synced; listeners.forEach((l) => l()); }
+function saveSettings(s: Settings) { const settings = normaliseSettings(s); if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); settingsCache = settings; listeners.forEach((l) => l()); }
+function patchItem(id: string, mutator: (it: Item) => Item) { saveItems(loadItems().map((it) => (it.id === id ? mutator({ ...it }) : it))); }
+function audit(it: Item, ev: AuditEvent): Item { return { ...it, auditEvents: [...it.auditEvents, ev], updatedAt: ev.at }; }
 
 export const itemsStore = {
-  subscribe(fn: () => void) {
-    listeners.add(fn);
-    return () => listeners.delete(fn);
-  },
-  getItems(): Item[] {
-    return loadItems();
-  },
-  getSettings(): Settings {
-    return loadSettings();
-  },
-  create(
-    item: Omit<Item, "id" | "code" | "createdAt" | "updatedAt" | "status" | "history"> & { status?: ItemStatus },
-  ): Item {
+  subscribe(fn: () => void) { listeners.add(fn); return () => listeners.delete(fn); },
+  getItems(): Item[] { return loadItems(); },
+  getSettings(): Settings { return loadSettings(); },
+
+  create(input: Omit<Item, "id" | "code" | "createdAt" | "updatedAt" | "status" | "originalPhotos" | "rectificationEvidence" | "closeoutEvidence" | "comments" | "issueHistory" | "inspectionHistory" | "auditEvents" | "photos" | "history"> & { status?: ItemStatus; originalPhotos: string[] }): Item {
     const now = new Date().toISOString();
     const existing = loadItems();
-    const code = nextCode(existing, item.type);
-    const newItem: Item = {
-      ...item,
-      id: makeId(),
-      code,
-      status: item.status ?? "open",
-      createdAt: now,
-      updatedAt: now,
-      history: [{ at: now, action: `Created (${code})` }],
-    };
+    const code = nextCode(existing, input.type);
+    const newItem: Item = { ...input, id: makeId(), code, status: input.status ?? "open", createdAt: now, updatedAt: now, originalPhotos: input.originalPhotos, rectificationEvidence: [], closeoutEvidence: [], comments: [], issueHistory: [], inspectionHistory: [], auditEvents: [{ at: now, action: `Created (${code})`, by: input.createdBy }], photos: input.originalPhotos, history: [] };
+    newItem.history = newItem.auditEvents;
     saveItems([newItem, ...existing]);
     return newItem;
   },
-  update(id: string, patch: Partial<Item>, historyEntry?: HistoryEntry) {
-    const items = loadItems().map((it) => {
-      if (it.id !== id) return it;
-      const updated: Item = {
-        ...it,
-        ...patch,
-        updatedAt: new Date().toISOString(),
-        history: historyEntry ? [...it.history, historyEntry] : it.history,
-      };
-      return updated;
-    });
-    saveItems(items);
-  },
-  setStatus(id: string, status: ItemStatus, note?: string) {
+
+  issue(id: string, opts: { to: string; by?: string; note?: string; reissue?: boolean }) {
     const at = new Date().toISOString();
-    const extra: Partial<Item> = {};
-    if (status === "issued") extra.issuedAt = at;
-    if (status === "in_progress") extra.inProgressAt = at;
-    this.update(id, { status, ...extra }, { at, action: `Status → ${status}`, note });
+    patchItem(id, (it) => audit({ ...it, subcontractor: opts.to || it.subcontractor, status: "issued", issuedAt: it.issuedAt ?? at, issueHistory: [...it.issueHistory, { at, to: opts.to, by: opts.by, note: opts.note, reissue: opts.reissue }], rejectionReason: opts.reissue ? undefined : it.rejectionReason }, { at, action: opts.reissue ? `Re-issued to ${opts.to}` : `Issued to ${opts.to}`, by: opts.by, note: opts.note }));
   },
-  close(id: string, closeout: Closeout) {
-    const at = new Date().toISOString();
-    this.update(
-      id,
-      { status: "closed", closeout },
-      { at, action: "Closed", by: closeout.signedBy, note: closeout.note },
-    );
-  },
-  remove(id: string) {
-    saveItems(loadItems().filter((it) => it.id !== id));
-  },
-  setSettings(s: Settings) {
-    saveSettings(s);
-  },
-  setActiveProject(name: string) {
-    const s = loadSettings();
-    const activeProject = s.projects.includes(name) ? name : s.projects[0] ?? DEFAULT_SETTINGS.activeProject;
-    saveSettings({ ...s, activeProject });
-  },
-  addSubcontractor(name: string) {
-    const s = loadSettings();
-    const cleanName = name.trim();
-    if (cleanName && !s.subcontractors.includes(cleanName)) {
-      saveSettings({ ...s, subcontractors: [...s.subcontractors, cleanName] });
-    }
-  },
-  addProject(name: string) {
-    const s = loadSettings();
-    const cleanName = name.trim();
-    if (cleanName && !s.projects.includes(cleanName)) {
-      saveSettings({ ...s, projects: [...s.projects, cleanName], activeProject: s.activeProject || cleanName });
-    }
-  },
+  markInProgress(id: string, by?: string) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, status: "in_progress", inProgressAt: at }, { at, action: "Marked in progress", by })); },
+  markReady(id: string, by?: string, note?: string) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, status: "ready_for_review", readyForReviewAt: at }, { at, action: "Marked ready for review", by, note })); },
+  startInspection(id: string, by: string) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, status: "under_inspection", underInspectionAt: at, inspectionHistory: [...it.inspectionHistory, { at, by, action: "started" }] }, { at, action: "Inspection started", by })); },
+  reject(id: string, by: string, reason: string) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, status: "rejected", rejectionReason: reason, inspectionHistory: [...it.inspectionHistory, { at, by, action: "rejected", reason }] }, { at, action: "Rejected on inspection", by, note: reason })); },
+  closeWithEvidence(id: string, evidence: Omit<CloseoutEvidence, "id" | "at">[]) { const at = new Date().toISOString(); patchItem(id, (it) => { const entries = evidence.map((e) => ({ ...e, id: makeId(), at })); return audit({ ...it, status: it.type === "incomplete" ? "complete" : "closed", closedAt: at, closeoutEvidence: [...it.closeoutEvidence, ...entries] }, { at, action: "Closed with evidence", by: entries[0]?.by }); }); },
+  reopen(id: string, by: string, reason: string) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, status: "in_progress", closedAt: undefined, inProgressAt: at }, { at, action: "Reopened", by, note: reason })); },
+  addRectification(id: string, ev: Omit<RectificationEvidence, "id" | "at"> & { advanceToReady?: boolean }) { const at = new Date().toISOString(); patchItem(id, (it) => { const entry: RectificationEvidence = { id: makeId(), at, photo: ev.photo, comment: ev.comment, by: ev.by }; let next = audit({ ...it, rectificationEvidence: [...it.rectificationEvidence, entry], status: it.status === "issued" ? "in_progress" : it.status, inProgressAt: it.inProgressAt ?? (it.status === "issued" ? at : it.inProgressAt) }, { at, action: "Rectification evidence added", by: ev.by, note: ev.comment }); if (ev.advanceToReady) next = audit({ ...next, status: "ready_for_review", readyForReviewAt: at }, { at, action: "Marked ready for review", by: ev.by }); return next; }); },
+  addComment(id: string, c: Omit<Comment, "id" | "at">) { const at = new Date().toISOString(); patchItem(id, (it) => audit({ ...it, comments: [...it.comments, { id: makeId(), at, text: c.text, by: c.by }] }, { at, action: "Comment added", by: c.by, note: c.text })); },
+  update(id: string, patch: Partial<Item>) { patchItem(id, (it) => ({ ...it, ...patch, updatedAt: new Date().toISOString() })); },
+  remove(id: string) { saveItems(loadItems().filter((it) => it.id !== id)); },
+
+  setSettings(s: Settings) { saveSettings(s); },
+  setActiveProject(name: string) { const s = loadSettings(); const activeProject = s.projects.includes(name) ? name : s.projects[0] ?? DEFAULT_SETTINGS.activeProject; saveSettings({ ...s, activeProject }); },
+  addSubcontractor(profile: SubProfile) { const s = loadSettings(); const name = profile.name.trim(); if (!name) return; const subcontractors = s.subcontractors.includes(name) ? s.subcontractors : [...s.subcontractors, name]; saveSettings({ ...s, subcontractors, subProfiles: { ...s.subProfiles, [name]: { ...profile, name } } }); },
+  updateSubProfile(name: string, patch: Partial<SubProfile>) { const s = loadSettings(); if (!s.subProfiles[name]) return; saveSettings({ ...s, subProfiles: { ...s.subProfiles, [name]: { ...s.subProfiles[name], ...patch, name } } }); },
+  removeSubcontractor(name: string) { const s = loadSettings(); const subProfiles = { ...s.subProfiles }; delete subProfiles[name]; saveSettings({ ...s, subcontractors: s.subcontractors.filter((n) => n !== name), subProfiles }); },
+  addProject(name: string) { const s = loadSettings(); const cleanName = name.trim(); if (!cleanName || s.projects.includes(cleanName)) return; saveSettings({ ...s, projects: [...s.projects, cleanName], projectConfigs: { ...s.projectConfigs, [cleanName]: DEFAULT_PROJECT_CONFIG(cleanName) }, activeProject: s.activeProject || cleanName }); },
+  updateProjectConfig(name: string, patch: Partial<ProjectConfig>) { const s = loadSettings(); const current = s.projectConfigs[name] ?? DEFAULT_PROJECT_CONFIG(name); saveSettings({ ...s, projectConfigs: { ...s.projectConfigs, [name]: { ...current, ...patch, name } } }); },
 };
 
-export function useItems(): Item[] {
-  return useSyncExternalStore(itemsStore.subscribe, getItemsSnapshot, () => []);
-}
-
-export function useSettings(): Settings {
-  return useSyncExternalStore(itemsStore.subscribe, getSettingsSnapshot, () => DEFAULT_SETTINGS);
-}
-
-export function isOverdue(item: Item): boolean {
-  if (item.status === "closed" || item.status === "complete") return false;
-  return item.dueDate < new Date().toISOString().slice(0, 10);
-}
+export function useItems(): Item[] { return useSyncExternalStore(itemsStore.subscribe, getItemsSnapshot, () => []); }
+export function useSettings(): Settings { return useSyncExternalStore(itemsStore.subscribe, getSettingsSnapshot, () => DEFAULT_SETTINGS); }
+export function isOverdue(item: Item): boolean { if (item.status === "closed" || item.status === "complete") return false; return item.dueDate < new Date().toISOString().slice(0, 10); }
+export function activeProjectConfig(s: Settings): ProjectConfig { return s.projectConfigs[s.activeProject] ?? DEFAULT_PROJECT_CONFIG(s.activeProject); }
