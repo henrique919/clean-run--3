@@ -35,7 +35,7 @@ export interface RectificationEvidence {
 /** Site-team closeout evidence. Multiple entries supported. */
 export interface CloseoutEvidence {
   id: string;
-  photo: string;
+  photo?: string;
   by: string;
   role: string;
   note?: string;
