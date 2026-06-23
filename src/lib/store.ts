@@ -5,7 +5,9 @@ import type { Item, ItemStatus, HistoryEntry, Closeout, ItemType, Priority } fro
 import { CODE_PREFIX, nextCode } from "./types";
 
 const KEY = "cleanrun-iq:items:v4";
-const SETTINGS_KEY = "cleanrun-iq:settings:v3";
+const LEGACY_ITEM_KEYS = ["cleanrun-iq:items:v3"];
+const SETTINGS_KEY = "cleanrun-iq:settings:v4";
+const LEGACY_SETTINGS_KEYS = ["cleanrun-iq:settings:v3"];
 
 export interface Settings {
   projects: string[];
@@ -32,7 +34,43 @@ const DEFAULT_SETTINGS: Settings = {
   company: "CleanRun Construction",
 };
 
+const VALID_TYPES: ItemType[] = ["defect", "incomplete", "client"];
+const VALID_STATUSES: ItemStatus[] = [
+  "open",
+  "issued",
+  "in_progress",
+  "ready_for_review",
+  "under_inspection",
+  "rejected",
+  "closed",
+  "complete",
+];
+
 const isBrowser = typeof window !== "undefined";
+
+function uniqueStrings(input: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(input)) return fallback;
+  const cleaned = input
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+  return cleaned.length ? Array.from(new Set(cleaned)) : fallback;
+}
+
+/** Merge and validate persisted settings so stale localStorage cannot blank the app. */
+function normaliseSettings(input: unknown): Settings {
+  const obj = input && typeof input === "object" ? (input as Partial<Settings>) : {};
+  const projects = uniqueStrings(obj.projects, DEFAULT_SETTINGS.projects);
+  const subcontractors = uniqueStrings(obj.subcontractors, DEFAULT_SETTINGS.subcontractors).sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const activeProject =
+    typeof obj.activeProject === "string" && projects.includes(obj.activeProject)
+      ? obj.activeProject
+      : projects[0] ?? DEFAULT_SETTINGS.activeProject;
+  const company = typeof obj.company === "string" && obj.company.trim() ? obj.company.trim() : DEFAULT_SETTINGS.company;
+
+  return { projects, subcontractors, activeProject, company };
+}
 
 /** Coerce any legacy priority value to the new high/urgent system. */
 function normalisePriority(p: unknown): Priority {
@@ -40,49 +78,119 @@ function normalisePriority(p: unknown): Priority {
   return "high";
 }
 
-/** Ensure every loaded item has a code + normalised priority. */
-function migrate(items: Item[]): Item[] {
-  // Group by type so we can assign sequential codes per prefix.
+function normaliseStatus(s: unknown): ItemStatus {
+  return VALID_STATUSES.includes(s as ItemStatus) ? (s as ItemStatus) : "open";
+}
+
+function normaliseType(t: unknown): ItemType {
+  return VALID_TYPES.includes(t as ItemType) ? (t as ItemType) : "defect";
+}
+
+/** Ensure every loaded item has the required current shape. */
+function migrate(items: unknown): Item[] {
+  if (!Array.isArray(items)) return seedItems();
+
+  const coerced = items.map((raw, idx) => {
+    const i = raw && typeof raw === "object" ? (raw as Partial<Item>) : {};
+    const type = normaliseType(i.type);
+    const status = normaliseStatus(i.status);
+    const now = new Date().toISOString();
+
+    return {
+      id: typeof i.id === "string" && i.id ? i.id : `item-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+      code: typeof i.code === "string" ? i.code : "",
+      type,
+      project: typeof i.project === "string" && i.project ? i.project : DEFAULT_SETTINGS.activeProject,
+      building: typeof i.building === "string" ? i.building : "",
+      level: typeof i.level === "string" ? i.level : "",
+      unit: typeof i.unit === "string" ? i.unit : "",
+      room: typeof i.room === "string" ? i.room : "",
+      trade: typeof i.trade === "string" ? i.trade : "",
+      subcontractor: typeof i.subcontractor === "string" ? i.subcontractor : "",
+      priority: normalisePriority(i.priority),
+      dueDate: typeof i.dueDate === "string" && i.dueDate ? i.dueDate : addDays(7),
+      description: typeof i.description === "string" ? i.description : "",
+      photos: Array.isArray(i.photos) ? i.photos.filter((p): p is string => typeof p === "string") : [],
+      status,
+      createdAt: typeof i.createdAt === "string" ? i.createdAt : now,
+      updatedAt: typeof i.updatedAt === "string" ? i.updatedAt : now,
+      issuedAt: typeof i.issuedAt === "string" ? i.issuedAt : undefined,
+      inProgressAt: typeof i.inProgressAt === "string" ? i.inProgressAt : undefined,
+      closeout: i.closeout,
+      history: Array.isArray(i.history) ? (i.history as HistoryEntry[]) : [{ at: now, action: "Created" }],
+    } satisfies Item;
+  });
+
   const counters: Record<ItemType, number> = { defect: 0, incomplete: 0, client: 0 };
-  // Seed counters from any pre-existing valid codes.
-  items.forEach((i) => {
+
+  coerced.forEach((i) => {
     const prefix = CODE_PREFIX[i.type];
     if (i.code?.startsWith(`${prefix}-`)) {
       const n = parseInt(i.code.slice(prefix.length + 1), 10);
       if (Number.isFinite(n) && n > counters[i.type]) counters[i.type] = n;
     }
   });
-  return items.map((i) => {
-    let code = i.code;
-    if (!code) {
-      counters[i.type] += 1;
-      code = `${CODE_PREFIX[i.type]}-${String(counters[i.type]).padStart(3, "0")}`;
-    }
-    return { ...i, code, priority: normalisePriority(i.priority) };
+
+  return coerced.map((i) => {
+    if (i.code) return i;
+    counters[i.type] += 1;
+    return { ...i, code: `${CODE_PREFIX[i.type]}-${String(counters[i.type]).padStart(3, "0")}` };
   });
+}
+
+function readJsonFromStorage(key: string): unknown | undefined {
+  if (!isBrowser) return undefined;
+  const raw = localStorage.getItem(key);
+  if (!raw) return undefined;
+  return JSON.parse(raw) as unknown;
 }
 
 function loadItems(): Item[] {
   if (!isBrowser) return [];
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return seedItems();
-    return migrate(JSON.parse(raw) as Item[]);
-  } catch {
-    return [];
+    const current = readJsonFromStorage(KEY);
+    if (current !== undefined) return migrate(current);
+
+    for (const legacyKey of LEGACY_ITEM_KEYS) {
+      const legacy = readJsonFromStorage(legacyKey);
+      if (legacy !== undefined) {
+        const migrated = migrate(legacy);
+        localStorage.setItem(KEY, JSON.stringify(migrated));
+        return migrated;
+      }
+    }
+
+    return seedItems();
+  } catch (error) {
+    console.warn("CleanRun IQ recovered from invalid stored items", error);
+    return seedItems();
   }
 }
 
 function loadSettings(): Settings {
   if (!isBrowser) return DEFAULT_SETTINGS;
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
-      return DEFAULT_SETTINGS;
+    const current = readJsonFromStorage(SETTINGS_KEY);
+    if (current !== undefined) {
+      const settings = normaliseSettings(current);
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      return settings;
     }
-    return JSON.parse(raw) as Settings;
-  } catch {
+
+    for (const legacyKey of LEGACY_SETTINGS_KEYS) {
+      const legacy = readJsonFromStorage(legacyKey);
+      if (legacy !== undefined) {
+        const settings = normaliseSettings(legacy);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+        return settings;
+      }
+    }
+
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
+    return DEFAULT_SETTINGS;
+  } catch (error) {
+    console.warn("CleanRun IQ recovered from invalid stored settings", error);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
     return DEFAULT_SETTINGS;
   }
 }
@@ -164,7 +272,6 @@ function seedItems(): Item[] {
       type: "defect", project: "Meta Street", building: "Tower 1", level: "L08", unit: "T1-803", room: "Kitchen",
       trade: "Electrical", subcontractor: "Northline Electrical", priority: "urgent", due: -1,
       description: "Powerpoint above benchtop not energised. Test circuit.",
-      // Long-running in_progress to demonstrate escalation in reports.
       status: "in_progress", hue: 50, label: "Power", daysAgoIssued: 14, daysAgoInProgress: 12,
     },
     {
@@ -198,7 +305,6 @@ function seedItems(): Item[] {
     },
   ];
 
-  // Per-type counters so codes are stable (DEF-001, DEF-002, INC-001 …).
   const counters: Record<ItemType, number> = { defect: 0, incomplete: 0, client: 0 };
 
   const seed: Item[] = specs.map((s, idx) => {
@@ -268,12 +374,17 @@ function saveItems(items: Item[]) {
 }
 
 function saveSettings(s: Settings) {
-  if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  settingsCache = s;
+  const settings = normaliseSettings(s);
+  if (isBrowser) localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  settingsCache = settings;
   listeners.forEach((l) => l());
 }
 
 void emit;
+
+function makeId() {
+  return globalThis.crypto?.randomUUID?.() ?? `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 export const itemsStore = {
   subscribe(fn: () => void) {
@@ -294,7 +405,7 @@ export const itemsStore = {
     const code = nextCode(existing, item.type);
     const newItem: Item = {
       ...item,
-      id: crypto.randomUUID(),
+      id: makeId(),
       code,
       status: item.status ?? "open",
       createdAt: now,
@@ -319,7 +430,6 @@ export const itemsStore = {
   },
   setStatus(id: string, status: ItemStatus, note?: string) {
     const at = new Date().toISOString();
-    // Stamp issuedAt / inProgressAt so escalation maths can run later.
     const extra: Partial<Item> = {};
     if (status === "issued") extra.issuedAt = at;
     if (status === "in_progress") extra.inProgressAt = at;
@@ -341,18 +451,21 @@ export const itemsStore = {
   },
   setActiveProject(name: string) {
     const s = loadSettings();
-    saveSettings({ ...s, activeProject: name });
+    const activeProject = s.projects.includes(name) ? name : s.projects[0] ?? DEFAULT_SETTINGS.activeProject;
+    saveSettings({ ...s, activeProject });
   },
   addSubcontractor(name: string) {
     const s = loadSettings();
-    if (!s.subcontractors.includes(name)) {
-      saveSettings({ ...s, subcontractors: [...s.subcontractors, name] });
+    const cleanName = name.trim();
+    if (cleanName && !s.subcontractors.includes(cleanName)) {
+      saveSettings({ ...s, subcontractors: [...s.subcontractors, cleanName] });
     }
   },
   addProject(name: string) {
     const s = loadSettings();
-    if (!s.projects.includes(name)) {
-      saveSettings({ ...s, projects: [...s.projects, name] });
+    const cleanName = name.trim();
+    if (cleanName && !s.projects.includes(cleanName)) {
+      saveSettings({ ...s, projects: [...s.projects, cleanName], activeProject: s.activeProject || cleanName });
     }
   },
 };
