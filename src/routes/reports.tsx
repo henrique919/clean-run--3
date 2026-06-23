@@ -28,7 +28,7 @@ function ReportsPage() {
     const scoped = items.filter((item) => item.project === settings.activeProject);
     if (key === "open") return scoped.filter((item) => item.status !== "closed" && item.status !== "complete");
     if (key === "overdue") return scoped.filter(isOverdue);
-    if (key === "closed") return scoped.filter((item) => item.status === "closed" || item.status === "complete");
+    if (key === "closed") return scoped.filter((item) => item.status === "closed" || item.status === "complete" || item.status === "rejected");
     if (key === "client") return scoped.filter((item) => item.type === "client");
     if (key === "incomplete") return scoped.filter((item) => item.type === "incomplete");
     return scoped;
@@ -99,7 +99,7 @@ function ReportsPage() {
           );
         })}
       </div>
-      <p className="mt-6 text-xs text-muted-foreground">Closeout reports separate original issue evidence, subcontractor rectification evidence, and signed-off closeout evidence.</p>
+      <p className="mt-6 text-xs text-muted-foreground">Closeout reports separate original issue evidence, subcontractor rectification evidence, signed-off closeout evidence, and rejected items still outstanding.</p>
     </AppShell>
   );
 }
